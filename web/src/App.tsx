@@ -1,7 +1,7 @@
 // 整个页面：侧边栏（导航和设置）和五个页面。多人模式下没登录时只有登录页。页面第一次打开时才画，之后切走只是藏起来。
 
 import { useEffect, useRef } from 'react';
-import { state, useStore, goTo, needsLogin, canManage } from './store.ts';
+import { state, useStore, goTo, needsLogin, canManage, hasAnyKey } from './store.ts';
 import { Login } from './account.tsx';
 import { Icon, type IconName } from './ui/Icon.tsx';
 import { LayerHosts } from './ui/layers.tsx';
@@ -39,7 +39,7 @@ export function App() {
 
 function Workbench() {
   const visit = useStore('view');
-  useStore('boot', 'app', 'immersive');
+  useStore('boot', 'app', 'immersive', 'flows');
   const view = state.view;
   const main = useRef<HTMLElement>(null);
   const opened = useRef(new Set<ViewId>(['create'])).current;
@@ -79,7 +79,7 @@ function Workbench() {
             <button className="nav-item" type="button" aria-label="管理" onClick={openAdmin}>
               <Icon name="sliders" stroke={NAV_STROKE} />
               <span>管理</span>
-              {!state.app.hasKey && <span className="dot dot-warn nav-dot" {...tip(NO_KEY)} aria-label={NO_KEY} />}
+              {!hasAnyKey() && <span className="dot dot-warn nav-dot" {...tip(NO_KEY)} aria-label={NO_KEY} />}
             </button>
           )}
           <button className="nav-item" type="button" aria-label="设置" onClick={openSettings}>

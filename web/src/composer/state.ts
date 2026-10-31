@@ -8,7 +8,7 @@ import { refFromRecord, kindOfFile, uploadLocalFile } from '../media.ts';
 import { toast } from '../ui/layers.tsx';
 import { buildVideoRequest, buildImageRequest, buildSpeechRequest, buildSfxRequest, buildMusicRequest, refsInUse, carryRefs } from '../request.ts';
 import { quoteCost, toCredits, type VideoSpec } from '../../../shared/models.ts';
-import { workflowCost, cleanInputs, formValues, ruleKind, ruleLabel, type InputRule, type WorkflowSummary } from '../../../shared/autodl.ts';
+import { workflowCost, cleanInputs, flowTextKey, flowUuidOf, flowVideoSpec, formValues, isFlowModel, ruleKind, ruleLabel, type InputRule, type WorkflowSummary } from '../../../shared/autodl.ts';
 import type { BuiltRequest, Character, CreateType, FlowSummary, HistoryItem, Kind, Ref, SkillRef, Studio, VideoForm, Voice } from '../types.ts';
 
 // 视频的表单单独存一份（生成记录里存的也是它）；当前选的类型和其余几种的表单存在另一份里。
@@ -167,7 +167,17 @@ function persist() {
 
 // 每个视频模型支持什么，由本地服务随模型列表一起给。列表还没读到时先按这一份保守的来。
 const FALLBACK_SPEC: VideoSpec = { resolutions: ['480p', '720p'], ratios: ['16:9', '4:3', '1:1', '3:4', '9:16'], durations: [4, 5, 6, 7, 8], autoDuration: false, frames: ['first_frame'], audio: false, seed: false };
-export const specOf = (model = composer.form.model) => state.videoSpecs[model] || FALLBACK_SPEC;
+// 每个视频模型支持什么，由本地服务随模型列表一起给。AutoDL 的工作流也算一种模型（id 是 flow:<uuid>），
+// 它的范围从目录里带下来的 input_rules 推出来：分辨率是选项的 label，时长是时长规则的范围。
+export const specOf = (model = composer.form.model) => state.videoSpecs[model] || flowSpecOf(model) || FALLBACK_SPEC;
+
+function flowSpecOf(model: string): VideoSpec | null {
+  if (!isFlowModel(model)) return null;
+  const item = state.flows.items.find((flow) => flow.uuid === flowUuidOf(model));
+  if (!item?.rules || !Object.keys(item.rules).length) return null;
+  const spec = flowVideoSpec(item.rules);
+  return { resolutions: spec.resolutions, ratios: spec.ratios, durations: spec.durations, autoDuration: false, frames: spec.frames, audio: spec.audio, seed: spec.seed, promptRequired: spec.promptRequired };
+}
 
 const allRefs = () => refsInUse(composer.form);
 

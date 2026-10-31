@@ -262,6 +262,112 @@ export function ruleKind(rule: InputRule): 'text' | 'textarea' | 'number' | 'tog
   return 'media';
 }
 
+// ---------- 工作流当成一种「模型」 ----------
+// 画布节点和模型菜单里，工作流和 Seedance、MiniMax 这些型号并列出现。id 加个前缀，免得和工作流自己的 uuid、别的平台的型号混在一起。
+export const FLOW_MODEL_PREFIX = 'flow:';
+export const flowModelId = (uuid: string): string => `${FLOW_MODEL_PREFIX}${uuid}`;
+export const isFlowModel = (model?: string | null): boolean => typeof model === 'string' && model.startsWith(FLOW_MODEL_PREFIX);
+export const flowUuidOf = (model: string): string => model.slice(FLOW_MODEL_PREFIX.length);
+
+// 工作流里放文字的那个参数：优先 prompt、prompt_text，没有就用第一条文字规则。
+export function flowTextKey(rules: Record<string, InputRule> = {}): string | null {
+  const text = Object.entries(rules).filter(([, rule]) => rule.type === 'string' || rule.type === 'prompt');
+  return (text.find(([key]) => key === 'prompt') || text.find(([key]) => key === 'prompt_text') || text[0])?.[0] || null;
+}
+
+// 这个工作流收哪几份某种素材，按规则里键名的顺序排（ref_image_0、ref_image_1…、first_frame…）。
+export function flowMediaKeys(rules: Record<string, InputRule> = {}, type: MediaRuleType): string[] {
+  return Object.entries(rules).filter(([, rule]) => rule.type === type).map(([key]) => key);
+}
+
+// 工作流变成视频节点的那几个参数：分辨率取 resolution 的选项，时长取时长规则的范围，首尾帧看有没有对应的规则。
+export interface FlowVideoSpec {
+  resolutions: string[];
+  ratios: string[];
+  durations: number[];
+  autoDuration: boolean;
+  frames: string[];
+  audio: boolean;
+  seed: boolean;
+  promptRequired: boolean;
+}
+
+export function flowVideoSpec(rules: Record<string, InputRule> = {}): FlowVideoSpec {
+  const resolution = rules.resolution;
+  const resolutions = resolution?.type === 'enum' ? (resolution.options || []).map((option) => option.label) : [];
+  // 有的工作流时长参数叫 audio_duration（对口型那个）。范围太大时不给秒数选项，让用户去「参数」里自己填。
+  const duration = rules.duration || rules.audio_duration;
+  const min = Number(duration?.min);
+  const max = Number(duration?.max);
+  const durations = Number.isFinite(min) && Number.isFinite(max) && max >= min && max - min <= 30 ? Array.from({ length: max - min + 1 }, (_, i) => min + i) : [];
+  const frames = ['first_frame', 'last_frame'].filter((key) => Object.hasOwn(rules, key));
+  const text = flowTextKey(rules);
+  return { resolutions, ratios: [], durations, autoDuration: false, frames, audio: false, seed: Object.hasOwn(rules, 'seed'), promptRequired: Boolean(text && rules[text].required) };
+}
+
+// 工作流当模型时，画布节点上收到的东西：一段文字、几份素材（按连线的顺序，图片带着首帧/尾帧的用途）、两个参数。
+export interface FlowMedia {
+  kind: MediaRuleType;
+  url: string;
+  role?: string;
+  name?: string;
+}
+
+// 把节点的输入按工作流的规则拼成提交的入参：文字放第一个文字规则，首帧/尾帧放对应规则，
+// 其余图片按 ref_image_0、1… 的顺序填，视频、音频同理；分辨率取规则里的 label，时长写进时长规则。
+// placed 是每份素材落在哪个规则上，做记录里的素材快照用。
+export function flowInputs(
+  rules: Record<string, InputRule> = {},
+  given: { prompt?: string; media?: FlowMedia[]; resolution?: string; duration?: number; extra?: Record<string, unknown> } = {},
+): { inputs: Record<string, unknown>; problems: string[]; placed: { key: string; media: FlowMedia }[] } {
+  const raw: Record<string, unknown> = {};
+  const placed: { key: string; media: FlowMedia }[] = [];
+  const textKey = flowTextKey(rules);
+  const prompt = String(given.prompt || '').trim();
+  if (textKey && prompt) raw[textKey] = prompt;
+
+  const media = given.media || [];
+  const imageKeys = flowMediaKeys(rules, 'image');
+  let slot = 0;
+  for (const item of media) {
+    if (item.kind !== 'image') continue;
+    const fixed = item.role === 'first' && rules.first_frame ? 'first_frame' : item.role === 'last' && rules.last_frame ? 'last_frame' : null;
+    const key = fixed || imageKeys[slot++];
+    if (!key) continue;
+    raw[key] = item.url;
+    placed.push({ key, media: item });
+  }
+  for (const kind of ['video', 'audio'] as MediaRuleType[]) {
+    const keys = flowMediaKeys(rules, kind);
+    let index = 0;
+    for (const item of media) {
+      if (item.kind !== kind) continue;
+      const key = keys[index++];
+      if (!key) continue;
+      raw[key] = item.url;
+      placed.push({ key, media: item });
+    }
+  }
+
+  if (rules.resolution?.type === 'enum') {
+    const labels = (rules.resolution.options || []).map((option) => option.label);
+    const chosen = String(given.resolution ?? '');
+    raw.resolution = labels.includes(chosen) ? chosen : ruleDefault(rules.resolution) ?? labels[0];
+  }
+  // 时长参数叫 duration 的居多，对口型那个叫 audio_duration。
+  const durationKey = rules.duration ? 'duration' : rules.audio_duration ? 'audio_duration' : null;
+  if (durationKey && given.duration) raw[durationKey] = given.duration;
+  // 节点上另外选的参数（模式、风格、开关…）：只认规则里真有的键，不认识的丢掉（服务端也会拒）。
+  for (const [key, rule] of Object.entries(rules)) {
+    if (raw[key] !== undefined) continue;
+    if (rule.type === 'image' || rule.type === 'video' || rule.type === 'audio' || rule.type === 'string' || rule.type === 'prompt') continue;
+    if (given.extra && given.extra[key] !== undefined) raw[key] = given.extra[key];
+  }
+
+  const { inputs, problems } = cleanInputs(rules, raw);
+  return { inputs, problems, placed };
+}
+
 // 表单的初始值：规则给的默认值；enum 没有默认值时取第一项；媒体空着等用户加。示例文字只当占位提示，不填进去。
 export function formValues(workflow: Pick<WorkflowSummary, 'input_rules' | 'input_example'>): Record<string, unknown> {
   const values: Record<string, unknown> = {};

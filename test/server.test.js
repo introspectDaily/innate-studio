@@ -971,6 +971,11 @@ test('AutoDL 工作流：目录和规则、提交前校验、参数换成 data U
   assert.equal(first.media.includes('audio'), true);
   assert.equal(second.fromCredits, 60);
   assert.equal(second.media.includes('image'), true);
+  // 出什么类型的文件、计费配置：画布把工作流当模型列出来、预估花费都要这两项。
+  assert.equal(first.output, 'audio');
+  assert.equal(second.output, 'video');
+  assert.equal(second.billing.price_type, 'minimax_h3');
+  assert.equal(second.billing.billing_config.minimax_h3.length, 2);
 
   // 详情：规则、计费配置都在这一份里。
   const detail = await call('GET', '/api/autodl/workflows/minimax_h3_demo');

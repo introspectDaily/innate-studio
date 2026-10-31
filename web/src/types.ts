@@ -245,7 +245,7 @@ export interface AppInfo extends KeyInfo {
   billing: KeyInfo;
 }
 
-// AutoDL.art 工作流目录里的一项。平台列表接口不带参数规则，规则在选中工作流时从详情接口取。
+// AutoDL.art 工作流目录里的一项。平台列表接口不带参数规则，规则由服务端补详情时一并带上（提交前服务端还会现取一次）。
 export interface FlowSummary {
   uuid: string;
   name: string;
@@ -253,6 +253,10 @@ export interface FlowSummary {
   cover?: string | null;
   priceType?: string;
   media?: Kind[];
+  // 出什么类型的文件。画布是按这个把工作流列给对应类型的节点。
+  output?: Kind;
+  // 计费配置，页面预估花费用。
+  billing?: { price_type?: string; billing_config?: Record<string, any>; price?: number };
   fromCredits?: number | null;
   usage?: number;
   rules?: Record<string, import('../../shared/autodl.ts').InputRule>;

@@ -4,9 +4,8 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
 import { App } from './App.tsx';
-import { state, on, emit, loadApp, loadModels, loadFlows, startHistoryLoop, needsLogin, canManage } from './store.ts';
+import { state, on, emit, loadApp, loadModels, loadFlows, startHistoryLoop, needsLogin } from './store.ts';
 import { initComposer } from './composer/state.ts';
-import { openAdmin } from './settings.tsx';
 import { toast } from './ui/layers.tsx';
 
 createRoot(document.getElementById('app')!).render(
@@ -15,11 +14,15 @@ createRoot(document.getElementById('app')!).render(
   </StrictMode>,
 );
 
-// 保存 Key 之后重新读取模型列表。
+// 保存 Key 之后重新读取模型列表和工作流目录。
 let hadKey: boolean | null = null;
+let hadFlow: boolean | null = null;
 on('app', () => {
   if (hadKey === false && state.app.hasKey) loadModels().catch(() => {});
   hadKey = state.app.hasKey;
+  const flow = Boolean(state.app.autodl?.hasKey);
+  if (hadFlow === false && flow) loadFlows(true).catch(() => {});
+  hadFlow = flow;
 });
 
 async function start() {
@@ -34,11 +37,11 @@ async function start() {
   state.booted = true;
   emit('boot');
   startHistoryLoop();
-  if (state.app.hasKey) loadModels().catch(() => {});
-  if (state.app.autodl?.hasKey) loadFlows().catch(() => {});
-  if (!state.app.hasKey) {
-    if (canManage()) openAdmin();
-  }
+  // 模型列表和工作流目录都无条件读：没配某个平台时服务端会把相应的型号标成不可用，
+  // 而不是什么都不给（只配了 AutoDL.art 的令牌时，画布也应该能看到工作流）。
+  loadModels().catch(() => {});
+  loadFlows().catch(() => {});
+  // 没配 Key 也不弹「管理」：页面照常打开，缺少的 Key 由侧栏的红点和输入框里的「设置 API Key」提示，点进去才开。
 }
 
 // 滚动条平时不显示：哪一块在滚就给它加上 .is-scrolling，停下一会儿再去掉。页面上所有能滚的地方都走这里。

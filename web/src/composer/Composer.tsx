@@ -2,7 +2,7 @@
 // 状态和动作在 state.ts。
 
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { state, useStore, KINDS, goTo, loadCharacters, canManage, usesCredits, modelOption, loadFlows } from '../store.ts';
+import { state, useStore, KINDS, goTo, loadCharacters, canManage, usesCredits, modelOption, loadFlows, flowReady, hasAnyKey } from '../store.ts';
 import { IMAGE_QUALITY_LABELS, modelLabel, modelNote, REFERENCE_MODE_LABEL, SPEECH_MODEL, AUDIO_MODEL } from '../../../shared/models.ts';
 import { ruleKind, ruleLabel, type InputRule } from '../../../shared/autodl.ts';
 import { musicSeconds } from '../request.ts';
@@ -615,23 +615,32 @@ const FLOW_KINDS: Record<string, Kind> = { image: 'image', video: 'video', audio
 // 挑选工作流：弹窗里列出目录（按最近一周的用量排），每个带封面、说明、必填的素材和起价。load=true 时先刷新一遍目录。
 function pickWorkflow(load = false) {
   if (load) loadFlows(true);
+  const modal = openModal({
+    title: state.flows.total ? `选择工作流（${state.flows.total} 个）` : '选择工作流',
+    size: 'lg',
+    content: (
+      <FlowPicker
+        onPick={(uuid) => {
+          modal.close();
+          pickFlow(uuid);
+        }}
+      />
+    ),
+  });
+}
+
+// 挑选弹窗里的目录。自己订阅 flows：目录是打开弹窗之后才读到的、或者点了刷新，列表都会跟着变，不用重开。
+function FlowPicker({ onPick }: { onPick: (uuid: string) => void }) {
+  useStore('flows');
   const list = state.flows.items;
-  const body = (
+  return (
     <div className="flow-picker">
       {list.length ? (
         <div className="pick-grid is-flows">
           {list.map((item: FlowSummary) => {
             const needs = (item.media || []).map((kind) => KINDS[kind].label).join('、');
             return (
-              <button
-                key={item.uuid}
-                className={`pick-card ${composer.studio.flow.workflow?.uuid === item.uuid ? 'is-current' : ''}`}
-                type="button"
-                onClick={() => {
-                  modal.close();
-                  pickFlow(item.uuid);
-                }}
-              >
+              <button key={item.uuid} className={`pick-card ${composer.studio.flow.workflow?.uuid === item.uuid ? 'is-current' : ''}`} type="button" onClick={() => onPick(item.uuid)}>
                 <div className="pick-thumb">{item.cover ? <img className="thumb-img" src={item.cover} alt="" loading="lazy" referrerPolicy="no-referrer" /> : <div className="thumb-fallback">{needs || '工作流'}</div>}</div>
                 <div className="pick-name ellipsis">{item.name}</div>
                 {item.description && <div className="pick-desc">{item.description}</div>}
@@ -644,11 +653,17 @@ function pickWorkflow(load = false) {
           })}
         </div>
       ) : (
-        <div className="empty small-empty">{state.flows.error || (state.flows.loaded ? '平台上还没有可用的工作流' : '读取工作流目录…')}</div>
+        <div className="empty small-empty">
+          {state.flows.error || (state.flows.loaded ? '平台上还没有可用的工作流' : '读取工作流目录…')}
+          {state.flows.loaded && (
+            <button className="entry-action-btn" type="button" onClick={() => loadFlows(true)}>
+              刷新目录
+            </button>
+          )}
+        </div>
       )}
     </div>
   );
-  const modal = openModal({ title: state.flows.total ? `选择工作流（${state.flows.total} 个）` : '选择工作流', size: 'lg', content: body });
 }
 
 // 左边的素材：规则里每一条 image / video / audio 是一个格子。加一份、去掉一份都按字段名记。
@@ -724,15 +739,22 @@ function FlowToolbar() {
   const definition = flowDefinition();
   if (!flow.workflow) {
     const ready = state.flows.loaded || state.flows.hasKey === false;
+    // 有没有令牌看目录接口给的 hasKey：多人模式下成员的 /api/state 里没有 autodl 这一项。
+    const enabled = flowReady();
     return (
       <>
-        <button className="dropdown dropdown-tool" type="button" disabled={!state.app.autodl?.hasKey || !ready} onClick={() => pickWorkflow()}>
+        <button className="dropdown dropdown-tool" type="button" disabled={!enabled || !ready} onClick={() => pickWorkflow(!state.flows.loaded)}>
           <Icon name="workflow" />
-          <span>{state.app.autodl?.hasKey ? (state.flows.loaded ? `工作流 · 共 ${state.flows.total} 个` : '读取工作流…') : '未配置 AutoDL.art 令牌'}</span>
+          <span>{enabled ? (state.flows.loaded ? `工作流 · 共 ${state.flows.total} 个` : '读取工作流…') : '未配置 AutoDL.art 令牌'}</span>
         </button>
-        {!state.app.autodl?.hasKey && canManage() && (
+        {!enabled && canManage() && (
           <button className="entry-action-btn" type="button" onClick={openAdmin}>
             去配置
+          </button>
+        )}
+        {enabled && state.flows.loaded && !state.flows.items.length && (
+          <button className="entry-action-btn" type="button" onClick={() => loadFlows(true)}>
+            刷新目录
           </button>
         )}
       </>
@@ -829,7 +851,7 @@ function FlowMorePanel({ fields }: { fields: [string, InputRule][] }) {
 
 function SendArea() {
   // 工作流用的是 AutoDL.art 的令牌，其余内容用的是火山方舟的 Key。
-  const needsKey = composer.studio.type === 'flow' ? !state.app.autodl?.hasKey : !state.app.hasKey;
+  const needsKey = composer.studio.type === 'flow' ? !flowReady() : !state.app.hasKey;
   if (needsKey) {
     // 多人模式下 Key 由管理员配，成员只能等。
     if (!canManage()) return <span className="composer-hint">服务暂未开通</span>;
@@ -988,7 +1010,8 @@ export function Composer() {
   const { known, image } = state.catalog;
   const missing: Record<string, boolean> = {
     image: Boolean(known && !image.length),
-    flow: !state.app.autodl?.hasKey || Boolean(state.flows.loaded && (state.flows.error || !state.flows.items.length)),
+    // 出错（比如平台临时超时）时不禁用，让人能进去点刷新重试。
+    flow: !flowReady() || Boolean(state.flows.loaded && !state.flows.error && !state.flows.items.length),
   };
 
   return (
@@ -1059,7 +1082,7 @@ export function Composer() {
           onKeyDown={(e) => {
             if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
               e.preventDefault();
-              if (state.app.hasKey && !composer.submitting) submit();
+              if (hasAnyKey() && !composer.submitting) submit();
             } else if (e.key === 'Backspace' && skill && e.currentTarget.selectionStart === 0 && e.currentTarget.selectionEnd === 0) {
               e.preventDefault();
               setSkill(null);

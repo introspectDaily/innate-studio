@@ -3,6 +3,7 @@
 
 import { useSyncExternalStore } from 'react';
 import type { VideoSpec } from '../../shared/models.ts';
+import { flowModelId, flowUuidOf, isFlowModel } from '../../shared/autodl.ts';
 import type { AppInfo, Character, CreateType, FlowSummary, HistoryItem, Kind, Skill, ViewId, Voice } from './types.ts';
 
 export class ApiError extends Error {
@@ -161,6 +162,17 @@ export function modelOption(id: string, label: string, note?: string | null) {
 }
 // 多人模式下的成员：看到的是积分，看不到元和各平台的余额。
 export const usesCredits = () => state.app.hosted && !isAdmin();
+
+// ---------- AutoDL.art 的工作流：当成一种模型 ----------
+// 工作流和型号并列出现在模型菜单里，id 是 flow:<uuid>。目录里带着它的规则和计费，不用再取一次。
+export const flowSummary = (model?: string | null) => (isFlowModel(model) ? state.flows.items.find((item) => item.uuid === flowUuidOf(String(model))) || null : null);
+export const flowModelLabel = (model: string) => flowSummary(model)?.name || flowUuidOf(model);
+// 这个类型的节点能用哪些工作流：看出什么文件（video、audio、image）和有没有拿到规则。
+export const flowModelsOf = (kind: Kind) => state.flows.items.filter((item) => item.output === kind && item.rules && Object.keys(item.rules).length).map((item) => flowModelId(item.uuid));
+// AutoDL.art 的令牌配好了（管理员直接看 state，成员只能看目录接口给的 hasKey）。
+export const flowReady = () => Boolean(state.app.autodl?.hasKey || state.flows.hasKey);
+// 至少有一个平台能用（火山方舟或 AutoDL.art）：侧栏的提示和快捷键看这个。
+export const hasAnyKey = () => Boolean(state.app.hasKey || flowReady());
 
 export async function loadApp() {
   state.app = { ...state.app, ...(await api('GET', '/api/state')) };

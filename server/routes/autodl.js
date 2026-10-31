@@ -30,7 +30,7 @@ async function withRules(workflows) {
       pending.slice(i, i + DETAIL_CONCURRENCY).map(async (workflow) => {
         try {
           const detail = await getWorkflow(workflow.uuid);
-          Object.assign(workflow, { input_rules: detail.input_rules, input_example: detail.input_example, output_example: detail.output_example, billing_config: detail.billing_config ?? workflow.billing_config });
+          Object.assign(workflow, { input_rules: detail.input_rules, input_example: detail.input_example, output_example: detail.output_example, billing_config: detail.billing_config ?? workflow.billing_config, description: workflow.description || detail.description || '', cover_image_url: workflow.cover_image_url || detail.cover_image_url || null });
         } catch {
           /* 取不到详情就不算起价 */
         }
@@ -55,6 +55,10 @@ async function catalogValue() {
         description: workflow.description || '',
         cover: workflow.cover_image_url || null,
         priceType: workflow.price_type || '',
+        // 出什么类型的文件（video、audio、image）：画布上按节点类型列可用工作流时用。
+        output: outputKind(workflow),
+        // 计费配置：页面（画布节点的预估花费）用同一套规则算。
+        billing: { price_type: workflow.price_type || '', billing_config: workflow.billing_config || {}, price: workflow.price ?? 0 },
         // 规则也带上：页面选中工作流后直接画表单，不用再取一次详情（提交前服务端仍会现取一份来校验）。
         rules: workflow.input_rules || {},
         // 这个工作流必须传的素材类型（image、video、audio），挑选列表里用来分类。

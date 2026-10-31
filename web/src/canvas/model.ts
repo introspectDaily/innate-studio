@@ -53,6 +53,8 @@ export interface ImageData extends Generated {
   // 节点里那张图实际的宽高比，图片读出来之后记下，节点的框按它定宽度。
   aspect?: number;
   ignoreSelfRef?: boolean;
+  // 模型是 AutoDL 的工作流时，节点上选的参数（模式、风格…），键是工作流规则里的参数名。
+  flowValues?: Record<string, unknown>;
 }
 export interface VideoData extends Generated {
   prompt: string;
@@ -66,9 +68,14 @@ export interface VideoData extends Generated {
   aspect?: number;
   selfFrame?: { url: string; name: string };
   selfRole?: 'reference';
+  // 模型是 AutoDL 的工作流时，节点上额外选的参数（模式、风格、开关…），键就是工作流规则里的参数名。
+  flowValues?: Record<string, unknown>;
 }
 export interface AudioData extends Generated {
   tool: 'speech' | 'sfx';
+  // 选的是 AutoDL 的音频工作流时，模型是 flow:<uuid>，参数放在 flowValues。不是工作流时不写。
+  model?: string;
+  flowValues?: Record<string, unknown>;
   prompt: string;
   voiceId: string;
   voiceName: string;

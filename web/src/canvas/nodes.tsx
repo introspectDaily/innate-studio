@@ -5,9 +5,10 @@
 
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { BaseEdge, Handle, NodeToolbar, Position, getBezierPath, useConnection, useEdges, useInternalNode, useReactFlow, useStore as useFlowStore, useUpdateNodeInternals, type ConnectionLineComponentProps, type EdgeProps, type Node, type NodeProps } from '@xyflow/react';
-import { state, useStore, loadVoices, isPendingTask, polishModel, modelOption, KINDS as MEDIA } from '../store.ts';
+import { state, useStore, loadVoices, isPendingTask, polishModel, modelOption, flowModelsOf, flowModelLabel, flowSummary, flowReady, KINDS as MEDIA } from '../store.ts';
 import { RATIOS, fitImageQuality, fitImageSize, hasLastFrame, imageQualities, imageRatios, imageRefLimit, imageSizes, specOf, voiceName } from '../composer/state.ts';
 import { IMAGE_QUALITY_LABELS, modelLabel, modelNote } from '../../../shared/models.ts';
+import { flowMediaKeys, isFlowModel, ruleDefault, ruleLabel } from '../../../shared/autodl.ts';
 import { recordName, uploadLocalFile } from '../media.ts';
 import { openAssetPicker } from '../assets.tsx';
 import { Icon, type IconName } from '../ui/Icon.tsx';
@@ -750,6 +751,34 @@ export function TextNode({ id, data: raw, selected, dragging }: NodeProps) {
 
 // ---------- 图片 ----------
 
+// 节点选的是 AutoDL.art 的工作流时，它自己的枚举、开关参数（模式、风格预设…）放进「参数」。键就是规则里的参数名，值存在节点的 flowValues 里。
+// skip 是节点上已经有控件的参数（视频的分辨率、时长）。
+function flowParamGroups(model: string, values: Record<string, unknown> | undefined, onChange: (next: Record<string, unknown>) => void, skip: string[] = []): ParamGroup[] {
+  const rules = flowSummary(model)?.rules || {};
+  return Object.entries(rules)
+    .filter(([key, rule]) => !skip.includes(key) && (rule.type === 'enum' || rule.type === 'boolean'))
+    .map(([key, rule]) => {
+      const chosen = values?.[key];
+      if (rule.type === 'boolean') {
+        return {
+          label: ruleLabel(rule, key),
+          value: String(chosen === undefined ? Boolean(ruleDefault(rule)) : Boolean(chosen)),
+          options: [
+            { value: 'true', label: '开' },
+            { value: 'false', label: '关' },
+          ],
+          onChange: (next: string) => onChange({ ...values, [key]: next === 'true' }),
+        };
+      }
+      return {
+        label: ruleLabel(rule, key),
+        value: String(chosen ?? ruleDefault(rule) ?? rule.options?.[0]?.label ?? ''),
+        options: (rule.options || []).map((option) => ({ value: option.label, label: option.label })),
+        onChange: (next: string) => onChange({ ...values, [key]: next }),
+      };
+    });
+}
+
 export function ImageNode({ id, data: raw, selected, dragging }: NodeProps) {
   const data = raw as unknown as ImageData;
   const flow = useReactFlow();
@@ -757,11 +786,16 @@ export function ImageNode({ id, data: raw, selected, dragging }: NodeProps) {
   const inputs = useInputs(id);
   const linked = inputs.some((i) => i.link.kind === 'text');
   const working = useWorking(data);
-  useStore('models', 'app');
-  const models = state.catalog.image.length ? state.catalog.image : [data.model];
+  useStore('models', 'app', 'flows');
+  // 模型菜单：图片的型号，加上 AutoDL.art 上出图的工作流（也当成一种模型）。
+  const flows = flowModelsOf('image');
+  const isFlow = isFlowModel(data.model);
+  const models = [...new Set([...(state.catalog.image.length ? state.catalog.image : [data.model]), ...flows])];
+  const modelName = (id: string) => (flows.includes(id) ? flowModelLabel(id) : modelLabel(id));
   const ratios = imageRatios(data.model);
-  // 这个模型收几张参考图。不收的模型不显示参考图那一排；已经连进来的仍然显示，方便看出问题在哪。
-  const refLimit = imageRefLimit(data.model);
+  // 这个模型收几张参考图。不收的模型不显示参考图那一排；已经连进来的仍然显示，方便看出问题在哪。工作流收几张，看它的图片规则。
+  const refLimit = isFlow ? flowMediaKeys(flowSummary(data.model)?.rules || {}, 'image').length : imageRefLimit(data.model);
+  const flowGroups = flowParamGroups(data.model, data.flowValues, (next) => flow.updateNodeData(id, { flowValues: next }));
   const { snap } = useContext(CanvasActions);
   const selfNode = flow.getNode(id);
   const selfOutput = selfNode ? outputOf(selfNode) : (data.upload ? { url: data.upload.url, kind: 'image' as const, name: data.upload.name } : null);
@@ -769,6 +803,7 @@ export function ImageNode({ id, data: raw, selected, dragging }: NodeProps) {
     !inputs.some((i) => i.link.kind === 'image') &&
     selfOutput?.kind === 'image' &&
     refLimit > 0 &&
+    !isFlow &&
     !(data as { ignoreSelfRef?: boolean }).ignoreSelfRef
   );
   const hasRefs = inputs.some((i) => i.link.kind === 'image') || usesSelfRef;
@@ -802,14 +837,19 @@ export function ImageNode({ id, data: raw, selected, dragging }: NodeProps) {
           <Prompt id={id} value={data.prompt} placeholder={promptHint(linked, hasRefs ? '描述修改要求，例如：把背景改成雪夜' : '描述主体、环境、构图、光线与风格')} presets={{ refs: inputs.filter((i) => i.link.kind === 'image').length + (usesSelfRef ? 1 : 0), limit: refLimit, run: (prompt) => generate(flow, id, snap, { prompt }) }} />
           {data.error && !data.busy && <p className="cnode-error">{data.error}</p>}
           <Bar working={working} ready={Boolean(data.prompt.trim()) || linked || hasRefs} action="生成图片" onSend={() => generate(flow, id, snap)}>
-            <Dropdown variant="tool" chevron label="模型" value={data.model} options={models.map((m) => modelOption(m, modelLabel(m)))} onChange={(model) => flow.updateNodeData(id, { model, ratio: imageRatios(model).includes(data.ratio) ? data.ratio : imageRatios(model)[0] || data.ratio, resolution: fitImageSize(model, data.resolution), quality: fitImageQuality(model, data.quality) })} />
+            <Dropdown variant="tool" chevron label="模型" value={data.model} options={models.map((m) => modelOption(m, modelName(m), flows.includes(m) ? 'AutoDL 工作流' : null))} onChange={(model) => flow.updateNodeData(id, { model, flowValues: undefined, ratio: imageRatios(model).includes(data.ratio) ? data.ratio : imageRatios(model)[0] || data.ratio, resolution: fitImageSize(model, data.resolution), quality: fitImageQuality(model, data.quality) })} />
             <Params
               label="参数"
               groups={[
-                { label: '比例', value: data.ratio, options: ratios.map((r) => ({ value: r, label: r })), onChange: (ratio) => flow.updateNodeData(id, { ratio }) },
-                { label: '分辨率', value: fitImageSize(data.model, data.resolution) || '', options: imageSizes(data.model).map((r) => ({ value: r, label: r })), onChange: (resolution) => flow.updateNodeData(id, { resolution }) },
-                ...(imageQualities(data.model).length ? [{ label: '画质', value: fitImageQuality(data.model, data.quality) || '', options: imageQualities(data.model).map((q) => ({ value: q, label: IMAGE_QUALITY_LABELS[q] || q })), onChange: (quality: string) => flow.updateNodeData(id, { quality }) }] : []),
+                ...(isFlow
+                  ? []
+                  : [
+                      { label: '比例', value: data.ratio, options: ratios.map((r) => ({ value: r, label: r })), onChange: (ratio: string) => flow.updateNodeData(id, { ratio }) },
+                      { label: '分辨率', value: fitImageSize(data.model, data.resolution) || '', options: imageSizes(data.model).map((r) => ({ value: r, label: r })), onChange: (resolution: string) => flow.updateNodeData(id, { resolution }) },
+                      ...(imageQualities(data.model).length ? [{ label: '画质', value: fitImageQuality(data.model, data.quality) || '', options: imageQualities(data.model).map((q) => ({ value: q, label: IMAGE_QUALITY_LABELS[q] || q })), onChange: (quality: string) => flow.updateNodeData(id, { quality }) }] : []),
+                    ]),
                 { label: '张数', value: String(data.count || 1), options: IMAGE_COUNTS.map((n) => ({ value: String(n), label: `${n} 张` })), onChange: (count) => flow.updateNodeData(id, { count: Number(count) }) },
+                ...flowGroups,
               ]}
             />
           </Bar>
@@ -1024,13 +1064,27 @@ export function VideoNode({ id, data: raw, selected, dragging }: NodeProps) {
   const inputs = useInputs(id);
   const linked = inputs.some((i) => i.link.kind === 'text');
   const working = useWorking(data);
-  useStore('models', 'app');
-  const models = state.models.includes(data.model) ? state.models : [data.model, ...state.models];
+  useStore('models', 'app', 'flows');
+  // 模型菜单：火山方舟、MiniMax 的型号，加上 AutoDL.art 上出视频的工作流（也当成一种模型）。
+  const flows = flowModelsOf('video');
+  const models = [...new Set([...(state.models.includes(data.model) ? state.models : [data.model, ...state.models]), ...flows].filter(Boolean))];
+  const isFlow = (id: string) => flows.includes(id);
+  const modelName = (id: string) => (isFlow(id) ? flowModelLabel(id) : modelLabel(id));
+  const modelHint = (id: string) => (isFlow(id) ? 'AutoDL 工作流' : modelNote(id));
   const able = specOf(data.model);
   const ratioLabel = (value: string) => RATIOS.find((r) => r.value === value)?.label || value;
   const set = (patch: Partial<VideoData>) => flow.updateNodeData(id, patch);
+  // 模型是工作流时，它自己的枚举、开关参数（模式、风格预设…）也放进「参数」：键就是规则里的参数名。分辨率、时长用节点上直接的那两个。
+  const flowGroups = flowParamGroups(data.model, data.flowValues, (next) => set({ flowValues: next }), ['resolution']);
   const { snap } = useContext(CanvasActions);
   const hasSelfRef = Boolean(data.selfFrame || data.selfRole);
+  const modelCount = models.length;
+  // 目录晚于节点到达（或者只配了 AutoDL.art 的令牌，型号全不可用）时，节点可能还没选模型：
+  // 默认用菜单里的第一个，不然这个节点根本无法生成。
+  useEffect(() => {
+    if (!data.model && modelCount) set(fitVideo({ ...data, model: models[0] }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data.model, modelCount]);
   return (
     <Frame
       id={id}
@@ -1047,7 +1101,7 @@ export function VideoNode({ id, data: raw, selected, dragging }: NodeProps) {
           <Prompt id={id} value={data.prompt} placeholder={promptHint(linked, data.selfFrame ? '描述接续动作与剧情，例如：主角转身上车，车辆向远方驶去' : '描述主体、动作、场景、运镜、光线与风格')} />
           {data.error && !data.busy && <p className="cnode-error">{data.error}</p>}
           <Bar working={working} ready={Boolean(data.prompt.trim()) || inputs.length > 0 || hasSelfRef} action="生成视频" onSend={() => generate(flow, id, snap)}>
-            <Dropdown variant="tool" chevron label="模型" value={data.model} options={models.map((m) => modelOption(m, modelLabel(m), modelNote(m)))} onChange={(model) => set(fitVideo({ ...data, model }))} />
+            <Dropdown variant="tool" chevron label="模型" value={data.model} options={models.map((m) => modelOption(m, modelName(m), modelHint(m)))} onChange={(model) => set(fitVideo({ ...data, model }))} />
             <Params
               label="参数"
               groups={[
@@ -1055,6 +1109,7 @@ export function VideoNode({ id, data: raw, selected, dragging }: NodeProps) {
                 { label: '分辨率', value: data.resolution, options: able.resolutions.map((r) => ({ value: r, label: r })), onChange: (resolution) => set({ resolution }) },
                 { label: '时长', value: String(data.duration), options: able.durations.map((d) => ({ value: String(d), label: `${d} 秒` })), onChange: (duration) => set({ duration: Number(duration) }) },
                 { label: '段数', value: String(data.count || 1), options: VIDEO_COUNTS.map((n) => ({ value: String(n), label: `${n} 段` })), onChange: (count) => set({ count: Number(count) }) },
+                ...flowGroups,
               ]}
             />
           </Bar>
@@ -1074,8 +1129,11 @@ export function AudioNode({ id, data: raw, selected, dragging }: NodeProps) {
   const linked = useInputs(id).some((i) => i.link.kind === 'text');
   const working = useWorking(data);
   const [, redraw] = useState(0);
-  useStore('app');
-  const speech = data.tool !== 'sfx';
+  useStore('app', 'flows');
+  // 音频节点的模型：语音、音效两个内置的，加上 AutoDL.art 上出音频的工作流。选了工作流，节点按它的规则出。
+  const flows = flowModelsOf('audio');
+  const isFlow = isFlowModel(data.model);
+  const speech = !isFlow && data.tool !== 'sfx';
   const voices = state.voices || [];
 
   // 音色列表第一次用到时才读。还没选过音色：有中文的先用第一个中文的。
@@ -1097,7 +1155,7 @@ export function AudioNode({ id, data: raw, selected, dragging }: NodeProps) {
     };
   }, [speech, state.app.hasKey]);
 
-  const tools = [{ value: 'speech', label: '语音' }, { value: 'sfx', label: '音效' }];
+  const tools = [{ value: 'speech', label: '语音' }, { value: 'sfx', label: '音效' }, ...flows.map((id) => modelOption(id, flowModelLabel(id), 'AutoDL 工作流'))];
   return (
     <Frame
       id={id}
@@ -1113,8 +1171,16 @@ export function AudioNode({ id, data: raw, selected, dragging }: NodeProps) {
           <Refs id={id} kind="audio" />
           <Prompt id={id} value={data.prompt} placeholder={promptHint(linked, speech ? '输入朗读文本' : '描述声音的来源、材质与动作')} />
           {data.error && !data.busy && <p className="cnode-error">{data.error}</p>}
-          <Bar working={working} ready={Boolean(data.prompt.trim()) || linked} action={speech ? '生成语音' : '生成音效'} onSend={() => generate(flow, id)}>
-            {tools.length > 1 && <Dropdown variant="tool" chevron label="类型" value={data.tool} options={tools} onChange={(tool) => flow.updateNodeData(id, { tool })} />}
+          <Bar working={working} ready={Boolean(data.prompt.trim()) || linked} action={isFlow ? '运行工作流' : speech ? '生成语音' : '生成音效'} onSend={() => generate(flow, id)}>
+            <Dropdown
+              variant="tool"
+              chevron
+              label="类型"
+              value={isFlow ? data.model! : data.tool}
+              options={tools}
+              onChange={(next) => (isFlowModel(next) ? flow.updateNodeData(id, { model: next, flowValues: undefined }) : flow.updateNodeData(id, { tool: next as AudioData['tool'], model: undefined, flowValues: undefined }))}
+            />
+            {isFlow && <Params label="参数" groups={flowParamGroups(data.model!, data.flowValues, (next) => flow.updateNodeData(id, { flowValues: next }))} />}
             {speech && voices.length > 0 && (
               <Dropdown
                 variant="tool"

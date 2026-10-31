@@ -30,6 +30,8 @@ export const MINIMAX_VIDEO_PATH = '/v2/video_generation';
 // AutoDL 的状态是大写的 QUEUED / RUNNING / SUCCESS / FAILED，结果在 results 数组里（可能是视频、音频或图片）；
 // 下载结果地址不用带令牌（平台给的是对象存储的地址），只有平台自己域名下才用原样令牌。
 const AUTODL_STATUS = { QUEUED: 'queued', RUNNING: 'running', SUCCESS: 'success', FAILED: 'failed' };
+// 刚提交的任务第一次查询的间隔。平台上的小任务几秒就完了，等满一轮 6 秒太慢。
+const FIRST_POLL_MS = 1500;
 
 const PLATFORMS = {
   ark: {
@@ -119,6 +121,7 @@ export async function pollTask(space, item) {
     }
   } finally {
     item.lastPolledAt = Date.now();
+    item.polls = (item.polls || 0) + 1;
     // 先查再判断：服务停了很久再启动时，任务可能早就完成了。查过这一次仍没有结果才算超时。
     if (isPending(item) && Date.now() - item.createdAt > MAX_PENDING_MS) {
       item.status = 'failed';
@@ -233,7 +236,9 @@ function tick() {
       // 这个平台的 Key 被清掉了就先不查。
       if (item.direct || isLegacy(item) || !PLATFORMS[item.provider].key()) continue;
       if (isPending(item)) {
-        if (now - (item.lastPolledAt || 0) >= POLL_INTERVAL_MS) pollTask(space, item);
+        // 刚提交的任务先快点查一次（很多任务几秒就完了，不该让用户先等满一轮）。
+        const every = item.polls ? POLL_INTERVAL_MS : FIRST_POLL_MS;
+        if (now - (item.lastPolledAt || 0) >= every) pollTask(space, item);
       } else if (item.status === 'completed' && !item.localFile && item.remoteUrl) {
         if (now - (item.lastDownloadAt || 0) >= DOWNLOAD_RETRY_MS) downloadResult(space, item);
       }

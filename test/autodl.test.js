@@ -3,7 +3,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ruleDefault, requiredMedia, resolutionTier, stepPrice, workflowCost, cleanInputs, formValues, ruleKind, ruleLabel, durationOf, mediaAccepts } from '../shared/autodl.ts';
+import { ruleDefault, requiredMedia, resolutionTier, stepPrice, workflowCost, cleanInputs, formValues, ruleKind, ruleLabel, durationOf, mediaAccepts, flowModelId, flowUuidOf, flowTextKey, flowMediaKeys, flowVideoSpec, isFlowModel, flowInputs } from '../shared/autodl.ts';
 import { estimateCost, quoteCost, toCredits } from '../shared/models.ts';
 
 const MINIMAX = {
@@ -173,4 +173,112 @@ test('记录上的价格换算：AutoDL 的积分按当时的工作流快照算�
 
   // 没有快照就不估。
   assert.equal(estimateCost({ provider: 'autodl', kind: 'video', payload: {} }), null);
+});
+
+test('工作流当成一种模型：id 带前缀、文字和素材参数按规则找、节点上的参数范围从规则推出来', () => {
+  const id = flowModelId('minimax_h3_801');
+  assert.equal(id, 'flow:minimax_h3_801');
+  assert.equal(isFlowModel(id), true);
+  assert.equal(isFlowModel('MiniMax-H3'), false);
+  assert.equal(isFlowModel(undefined), false);
+  assert.equal(flowUuidOf(id), 'minimax_h3_801');
+
+  // 文字参数：prompt 优先，其次 prompt_text；一个文字规则都没有就是 null。
+  assert.equal(flowTextKey(MINIMAX.input_rules), 'prompt');
+  assert.equal(flowTextKey(TTS.input_rules), 'prompt_text');
+  assert.equal(flowTextKey({}), null);
+
+  // 素材参数按规则里的顺序，首尾帧和 ref_video 这种也叫得出名字。
+  assert.deepEqual(flowMediaKeys(MINIMAX.input_rules, 'image'), ['ref_image_0', 'ref_image_1']);
+  assert.deepEqual(flowMediaKeys(TTS.input_rules, 'audio'), ['prompt_simple', 'emo_ref_audio']);
+  assert.deepEqual(flowMediaKeys(RETARGET.input_rules, 'video'), ['ref_video']);
+  assert.deepEqual(flowMediaKeys(MINIMAX.input_rules, 'video'), []);
+
+  // 视频节点要的分辨率、时长、首尾帧：分辨率取选项的 label（提交的就是它），时长是规则的范围。
+  const spec = flowVideoSpec(MINIMAX.input_rules);
+  assert.deepEqual(spec.resolutions, ['480p竖(480*864)', '768p竖(768*1376)', '1088p竖(1088*1920)']);
+  assert.deepEqual(spec.durations, Array.from({ length: 15 }, (_, i) => i + 1));
+  assert.deepEqual(spec.frames, []);
+  assert.equal(spec.seed, true);
+  assert.equal(spec.audio, false);
+  assert.equal(spec.promptRequired, true);
+
+  // 首尾帧的工作流、没有时长规则的（TTS）都要照实反映。
+  assert.deepEqual(flowVideoSpec({ first_frame: { type: 'image', required: true }, last_frame: { type: 'image', required: true } }).frames, ['first_frame', 'last_frame']);
+  assert.deepEqual(flowVideoSpec(TTS.input_rules).durations, []);
+});
+
+test('画布节点到工作流入参：提示词、首尾帧、参考素材、分辨率、时长各归各位', () => {
+  // 文字 + 一张参考图（必填的 ref_image_0）：提示词进 prompt，图片进 ref_image_0，别的参数按默认值。
+  const first = flowInputs(MINIMAX.input_rules, {
+    prompt: '一只猫在云上跑',
+    media: [{ kind: 'image', url: '/media/uploads/a.png', name: 'a.png' }],
+    resolution: '1088p竖(1088*1920)',
+    duration: 9,
+  });
+  assert.deepEqual(first.problems, []);
+  assert.equal(first.inputs.prompt, '一只猫在云上跑');
+  assert.equal(first.inputs.ref_image_0, '/media/uploads/a.png');
+  assert.equal(first.inputs.resolution, '1088p竖(1088*1920)');
+  assert.equal(first.inputs.duration, 9);
+  assert.equal('ref_image_1' in first.inputs, false, '没连第二张就不发');
+  assert.deepEqual(first.placed.map((entry) => entry.key), ['ref_image_0']);
+
+  // 分辨率给的值不在选项里：换成规则里的默认值，而不是原样发出去。
+  assert.equal(flowInputs(MINIMAX.input_rules, { prompt: '猫', media: [{ kind: 'image', url: 'u' }], resolution: '720p' }).inputs.resolution, '768p竖(768*1376)');
+
+  // 首尾帧的工作流：连线标了用途的进 first_frame / last_frame。
+  const frames = flowInputs(
+    { prompt: { type: 'string', required: true }, first_frame: { type: 'image', required: true }, last_frame: { type: 'image', required: true } },
+    { prompt: '接上', media: [{ kind: 'image', url: 'last.png', role: 'last' }, { kind: 'image', url: 'first.png', role: 'first' }] },
+  );
+  assert.deepEqual(frames.problems, []);
+  assert.equal(frames.inputs.first_frame, 'first.png');
+  assert.equal(frames.inputs.last_frame, 'last.png');
+
+  // 动作迁移：一张图 + 一段视频。
+  const retarget = flowInputs(RETARGET.input_rules, { media: [{ kind: 'image', url: 'p.png' }, { kind: 'video', url: '/media/uploads/v.mp4' }] });
+  assert.deepEqual(retarget.problems, []);
+  assert.equal(retarget.inputs.ref_image, 'p.png');
+  assert.equal(retarget.inputs.ref_video, '/media/uploads/v.mp4');
+
+  // 声纹克隆：文字进 prompt_text，参考音频进 prompt_simple；情感控制方式补默认值。
+  const tts = flowInputs(TTS.input_rules, { prompt: '你好', media: [{ kind: 'audio', url: '/media/uploads/a.wav' }] });
+  assert.deepEqual(tts.problems, []);
+  assert.equal(tts.inputs.prompt_text, '你好');
+  assert.equal(tts.inputs.prompt_simple, '/media/uploads/a.wav');
+  assert.equal(tts.inputs.emo_control_method, '与音色参考音频相同');
+
+  // 必填素材没连到：报错文案说得出缺哪一份，而不是把请求发出去。
+  const missing = flowInputs(MINIMAX.input_rules, { prompt: '猫' });
+  assert.match(missing.problems[0], /请填写图片参考图1/);
+
+  // 时长参数叫 audio_duration 的工作流，写进它自己的键。
+  const lipSync = flowInputs(
+    { ref_image_0: { type: 'image', required: true }, ref_audio_0: { type: 'audio', required: true }, audio_duration: { type: 'integer', default: 5, min: 1, max: 15 }, resolution: { type: 'enum', default: '768p竖', options: [{ label: '480p竖' }, { label: '768p竖' }] } },
+    { media: [{ kind: 'image', url: 'p.png' }, { kind: 'audio', url: 'a.wav' }], duration: 7 },
+  );
+  assert.deepEqual(lipSync.problems, []);
+  assert.equal(lipSync.inputs.audio_duration, 7);
+  assert.equal('duration' in lipSync.inputs, false);
+  assert.equal(lipSync.inputs.resolution, '768p竖');
+});
+
+test('画布节点里的其余参数：枚举、开关跟着提交，不认识的键丢掉', () => {
+  const base = { prompt: '猫', media: [{ kind: 'image', url: 'u' }] };
+  const picked = flowInputs(MINIMAX.input_rules, { ...base, extra: { mode: '高速模式', bogus: 1, seed: 42 } });
+  assert.deepEqual(picked.problems, []);
+  assert.equal(picked.inputs.mode, '高速模式');
+  assert.equal(picked.inputs.seed, 42, '数字参数也认');
+  assert.equal('bogus' in picked.inputs, false, '规则里没有的键不跟着发');
+
+  // 开关按布尔发出去。
+  const toggled = flowInputs(TTS.input_rules, { prompt: '你好', media: [{ kind: 'audio', url: 'a.wav' }], extra: { emo_random: true, emo_happy: 0.8 } });
+  assert.deepEqual(toggled.problems, []);
+  assert.equal(toggled.inputs.emo_random, true);
+  assert.equal(toggled.inputs.emo_happy, 0.8);
+
+  // 枚举给了不在选项里的 label：拦下来，不提交。
+  const bad = flowInputs(MINIMAX.input_rules, { ...base, extra: { mode: '极速模式' } });
+  assert.match(bad.problems[0], /须从可选值里选/);
 });

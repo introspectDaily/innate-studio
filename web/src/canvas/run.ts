@@ -2,9 +2,10 @@
 // 结果是一条普通的生成记录，节点只记它的 id，进度跟着「创作记录」的轮询走。
 
 import type { Edge, Node, ReactFlowInstance } from '@xyflow/react';
-import { api, state, KINDS, startHistoryLoop, loadHistory, polishModel, canManage, usesCredits } from '../store.ts';
+import { api, state, KINDS, startHistoryLoop, loadHistory, polishModel, canManage, usesCredits, flowModelsOf, flowSummary, flowReady } from '../store.ts';
 import { fmtCredits, fmtYuan } from '../format.ts';
 import { quoteCost, toCredits } from '../../../shared/models.ts';
+import { durationOf, flowInputs, isFlowModel, workflowCost, type FlowMedia } from '../../../shared/autodl.ts';
 import { defaults, fitImageQuality, fitImageSize, hasLastFrame, imageRefLimit, specOf } from '../composer/state.ts';
 import { buildVideoRequest, buildImageRequest, buildSpeechRequest, buildSfxRequest } from '../request.ts';
 import { recordName } from '../media.ts';
@@ -62,10 +63,42 @@ function videoRequest(node: Node, sources: { link: LinkData; node: Node }[], pro
   return { form, payload: request.payload };
 }
 
+// 选的是工作流（哪种节点都可能选）：按它的规则拼入参，提交到 AutoDL.art 的那条接口。
+async function submitFlow(node: Node, sources: { link: LinkData; node: Node }[], prompt: string, say: (text: string) => void) {
+  const { flow, inputs, form } = flowRequest(sources, node, prompt);
+  say('正在提交');
+  return (await api<HistoryItem>('POST', '/api/autodl/submit', { workflow: flow.uuid, inputs, form: { ...form, ...FROM_CANVAS } })).id;
+}
+
 async function submitVideo(node: Node, sources: { link: LinkData; node: Node }[], prompt: string, say: (text: string) => void) {
   const { form, payload } = videoRequest(node, sources, prompt);
   say('正在提交');
   return (await api<HistoryItem>('POST', '/api/videos', { payload, form: { ...form, ...FROM_CANVAS } })).id;
+}
+
+// 工作流当模型用：把节点里的提示词、连进来的素材和节点上选的参数，按工作流的 input_rules 拼成入参。
+// forQuote 只是为了估价：上游还没生成的素材先用空地址顶上，只要知道填了哪些字段。
+function flowRequest(sources: { link: LinkData; node: Node }[], node: Node, prompt: string, forQuote = false) {
+  const data = node.data as unknown as { model: string; resolution?: string; duration?: number; flowValues?: Record<string, unknown> };
+  const flow = flowSummary(data.model);
+  if (!flow?.rules) throw new Error('这个工作流已经不在目录里，请重新选一个');
+  const media: FlowMedia[] = [];
+  for (const source of sources.filter((s) => s.link.kind !== 'text')) {
+    const kind = source.link.kind as Kind;
+    const output = outputOf(source.node) || (forQuote ? { url: '', name: '' } : null);
+    if (!output) throw new Error(`上游${NODE_LABELS[kind]}节点尚未生成`);
+    media.push({ kind, url: output.url, name: output.name, role: source.link.role });
+  }
+  // 视频的分辨率、时长是节点上直接选的；图片、音频的分辨率和其他参数一样放在「参数」里（flowValues）。
+  const isVideo = node.type === 'video';
+  const { inputs, problems, placed } = flowInputs(flow.rules, { prompt, media, resolution: isVideo ? data.resolution : String(data.flowValues?.resolution ?? ''), duration: isVideo ? data.duration : undefined, extra: data.flowValues });
+  if (problems.length && !forQuote) throw new Error(problems[0]);
+  // 记录里的素材快照：以后复现这条记录时，输入框里的格子能按当时的样子恢复。
+  const refs: Record<string, Ref> = {};
+  for (const { key, media: item } of placed) {
+    refs[key] = { uid: crypto.randomUUID(), kind: item.kind, source: 'local', url: item.url, name: item.name || '', thumb: null };
+  }
+  return { flow, inputs, form: { type: 'flow' as const, workflow: flow, values: inputs, refs } };
 }
 
 // 画布上提交的记录带着这个记号：创作页的「最近生成」不列它们，记录页里切到「画布」才看。
@@ -170,12 +203,29 @@ export function deliver(flow: Flow, id: string, results: Record<string, unknown>
   }
 }
 
+// 一次只提交一份的接口（视频、工作流）：要几份就提交几次。中途有一次没提交上，已经提交的照样放上画布。
+async function submitEach(count: number, say: (text: string) => void, submit: (report: (text: string) => void) => Promise<string>) {
+  const ids: string[] = [];
+  for (let n = 0; n < count; n++) {
+    try {
+      ids.push(await submit((text) => say(count > 1 ? `${text}（${n + 1}/${count}）` : text)));
+    } catch (err) {
+      if (!ids.length) throw err;
+      toast(`第 ${n + 1} 份提交失败：${(err as Error).message}`, 'error', 6000);
+      break;
+    }
+  }
+  return ids;
+}
+
 // once：只管这一次的临时安排。prompt 是直接用这段提示词（斜杠预设、扩图），refs 是直接用这几张参考图。
 export async function generate(flow: Flow, id: string, snap: () => void = () => {}, once: { prompt?: string; refs?: { url: string; name: string }[] } = {}) {
   const node = flow.getNode(id);
   if (!node || (node.data as AnyData).busy) return;
   if (node.type === 'text') return write(flow, id, snap);
-  if (!state.app.hasKey) return toast(canManage() ? '请先在「管理」中配置 API Key' : '服务暂未开通', 'info');
+  // 选的是工作流时看 AutoDL.art 的令牌，其余类型看火山方舟的 Key。
+  const flowNode = isFlowModel(String((node.data as AnyData).model || ''));
+  if (flowNode ? !flowReady() : !state.app.hasKey) return toast(canManage() ? (flowNode ? '请先在「管理」中配置 AutoDL.art 令牌' : '请先在「管理」中配置 API Key') : '服务暂未开通', 'info');
   const say = (busy: string) => flow.updateNodeData(id, { busy });
   flow.updateNodeData(id, { busy: '准备中', error: '' });
   try {
@@ -188,20 +238,10 @@ export async function generate(flow: Flow, id: string, snap: () => void = () => 
     const kind = node.type as NodeKind;
     const count = Math.max(1, Number((node.data as AnyData).count) || 1);
     let ids: string[];
-    if (kind === 'image') ids = await submitImage(node, sources, prompt, once.refs);
-    else if (kind === 'video') {
-      // 视频接口一次只出一段，要几段就提交几次。中途有一次没提交上，已经提交的照样放上画布。
-      ids = [];
-      for (let n = 0; n < count; n++) {
-        try {
-          ids.push(await submitVideo(node, sources, prompt, (text) => say(count > 1 ? `${text}（${n + 1}/${count}）` : text)));
-        } catch (err) {
-          if (!ids.length) throw err;
-          toast(`第 ${n + 1} 段提交失败：${(err as Error).message}`, 'error', 6000);
-          break;
-        }
-      }
-    } else ids = [await submitAudio(node, prompt)];
+    if (flowNode) ids = await submitEach(count, say, (report) => submitFlow(node, sources, prompt, report));
+    else if (kind === 'image') ids = await submitImage(node, sources, prompt, once.refs);
+    else if (kind === 'video') ids = await submitEach(count, say, (report) => submitVideo(node, sources, prompt, report));
+    else ids = [await submitAudio(node, prompt)];
     // 音频还是在原节点上换成新的；图片、视频已经有内容时不覆盖，新结果放进新节点。
     if (kind === 'audio') flow.updateNodeData(id, { recordId: ids[0], upload: undefined });
     else deliver(flow, id, ids.map((recordId) => ({ recordId, upload: undefined })), snap);
@@ -261,6 +301,12 @@ export function quoteNode(flow: Flow, id: string): number | null {
     .filter((s) => s.node);
   const prompt = promptOf(sources, (node.data as AnyData).prompt || '');
   try {
+    if (isFlowModel(String((node.data as AnyData).model || ''))) {
+      // 工作流的价按提交的这组参数算（分辨率档、按秒计费的时长），和创作页用同一套规则。
+      const { flow, inputs } = flowRequest(sources, node, prompt, true);
+      const yuan = workflowCost({ price_type: flow.billing?.price_type, billing_config: flow.billing?.billing_config, price: flow.billing?.price }, inputs, durationOf(inputs));
+      return yuan == null ? null : yuan * Math.max(1, Number((node.data as AnyData).count) || 1);
+    }
     if (node.type === 'video') {
       const payload = videoRequest(node, sources, prompt, true).payload || {};
       const yuan = quoteCost({ kind: 'video', model: String(payload.model || ''), payload });
@@ -341,7 +387,10 @@ export function newNodeData(kind: NodeKind, seed: { form: { model: string; resol
     return { prompt: '', model, ratio: seed.image.ratio, resolution: fitImageSize(model, seed.image.resolution) };
   }
   if (kind === 'video') {
-    const model = state.models.includes(seed.form.model) ? seed.form.model : state.models[0];
+    // 新建节点的默认模型：优先能用的型号（所在的平台配了 Key），都不可用时用目录里第一个出视频的工作流。
+    const usable = state.models.filter((m) => !state.catalog.unavailable.includes(m));
+    const flows = flowModelsOf('video');
+    const model = usable.includes(seed.form.model) ? seed.form.model : usable[0] || flows[0] || state.models[0] || '';
     return { ...fitVideo({ prompt: '', model, resolution: seed.form.resolution, ratio: seed.form.ratio, duration: seed.form.duration }) };
   }
   return { tool: 'speech', prompt: '', voiceId: seed.speech.voiceId, voiceName: seed.speech.voiceName };
