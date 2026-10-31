@@ -1215,6 +1215,9 @@ function Refs({ id, kind, model = '', limit = 0, mode }: { id: string; kind: Nod
           </MediaTile>
         );
       })}
+      {wantSlots.map((slot) => (
+        <AddTile key={slot.key} label={`添加${slot.label}`} caption={slot.label} tipText="从素材库选择，或把画布上的素材节点连过来" onClick={(e) => pickSlot(e.currentTarget, slot)} />
+      ))}
       <AddTile label={only ? '添加文本节点' : '添加上游节点'} tipText={only ? '添加文本' : forImage ? '添加参考图或文本' : '添加参考素材或文本'} aria-haspopup={only ? undefined : 'menu'} aria-expanded={only ? undefined : false} onClick={(e) => add(e.currentTarget)} />
     </div>
   );
