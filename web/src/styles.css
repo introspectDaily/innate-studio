@@ -848,8 +848,8 @@ input[type='search']::-webkit-search-cancel-button { -webkit-appearance: none; }
   --xy-attribution-background-color: transparent;
   font: inherit;
 }
-/* 小地图点开才显示，叠在左下角那一条的上面 */
-.canvas .react-flow__minimap { overflow: hidden; margin-bottom: var(--sp-64); border: 1px solid var(--border-float); border-radius: var(--r-sm); }
+/* 小地图点开才显示，放在右下角 */
+.canvas .react-flow__minimap { overflow: hidden; margin: 0 var(--sp-4) var(--sp-4) 0; border: 1px solid var(--border-float); border-radius: var(--r-sm); }
 /* 署名的字号按规范取最小的一档（React Flow 默认是 10px，不在阶梯里）。 */
 .canvas .react-flow__attribution a { color: var(--text-4); font-size: var(--text-micro); }
 /* 连接点：框的左右两边各一块看不见的感应区（屏幕上 52 见方，贴着框边，正对框的中线），里面一个 14 像素的小加号。
@@ -1019,6 +1019,14 @@ input[type='search']::-webkit-search-cancel-button { -webkit-appearance: none; }
 /* 标题旁的「视频 1 的尾帧」：比名字淡一档的小字，指上去变亮，点了跳到那个视频。 */
 .cnode-origin { margin-left: var(--sp-4); padding: 0; border: 0; background: none; color: var(--text-4); font-size: var(--text-caption); white-space: nowrap; cursor: pointer; transition: color var(--t-fast) var(--ease); }
 @media (hover: hover) { .cnode-origin:hover { color: var(--text); } }
+/* 节点的历史版本：一版一行，左边小图，中间来源和时间，右边「查看」「换回」。列表长了在弹窗里滚动。 */
+.cnode-kept { display: flex; flex-direction: column; gap: var(--sp-2); max-height: 60vh; overflow-y: auto; }
+.cnode-kept-item { display: flex; align-items: center; gap: var(--sp-12); padding: var(--sp-8); border-radius: var(--r-sm); }
+.cnode-kept-item > img, .cnode-kept-icon { flex: none; width: 56px; height: 56px; border-radius: var(--r-xs); background: var(--surface-2); object-fit: cover; }
+.cnode-kept-icon { display: flex; align-items: center; justify-content: center; color: var(--text-4); }
+.cnode-kept-text { display: flex; flex: 1; flex-direction: column; gap: var(--sp-2); min-width: 0; }
+.cnode-kept-prompt { overflow: hidden; color: var(--text); font-size: var(--text-body); line-height: var(--lh-snug); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.cnode-kept-meta { color: var(--text-4); font-size: var(--text-caption); }
 .cnode-acts { display: flex; align-items: center; gap: var(--sp-2); flex: none; cursor: default; animation: fade var(--t-quick) var(--ease-out); }
 .cnode-box { display: grid; height: 240px; overflow: hidden; background: var(--surface-1); border-radius: var(--r-lg); box-shadow: 0 0 0 1px var(--border); outline: var(--ring, 1.5px) solid transparent; outline-offset: var(--ring-gap, 3px); }
 @media (hover: hover) { .cnode:not(.selected):hover .cnode-box { box-shadow: 0 0 0 1px var(--border-strong); } }
@@ -1203,3 +1211,23 @@ input[type='search']::-webkit-search-cancel-button { -webkit-appearance: none; }
 .material-publication { display: flex; align-items: center; gap: var(--sp-4); min-width: 0; color: var(--text-2); font-size: var(--text-micro); }
 .material-publication span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .material-publication.is-stale { color: var(--text-3); }
+
+/* ---------- 视频剪辑器 ---------- */
+.ve { display: flex; flex-direction: column; gap: var(--sp-12); }
+.ve-preview { width: 100%; max-height: 46vh; background: #000; border-radius: var(--sp-8); }
+.ve-timeline { position: relative; height: 52px; margin: var(--sp-4) 0; padding: 0; cursor: pointer; touch-action: none; user-select: none; }
+.ve-track { position: absolute; inset: 14px 0; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--sp-4); }
+.ve-selection { position: absolute; top: 14px; bottom: 14px; background: color-mix(in srgb, var(--accent) 32%, transparent); border-left: 2px solid var(--accent); border-right: 2px solid var(--accent); }
+.ve-seg-mark { position: absolute; top: 18px; bottom: 18px; background: color-mix(in srgb, var(--ok) 35%, transparent); border: 1px solid color-mix(in srgb, var(--ok) 60%, transparent); border-radius: 3px; pointer-events: none; }
+.ve-handle { position: absolute; top: 8px; bottom: 8px; width: 10px; margin-left: -5px; background: var(--accent); border-radius: var(--sp-4); cursor: ew-resize; box-shadow: var(--shadow-tile); }
+.ve-handle-start { left: 0; }
+.ve-handle-end { left: 0; }
+.ve-playhead { position: absolute; top: 4px; bottom: 4px; width: 2px; margin-left: -1px; background: var(--on-scrim); pointer-events: none; }
+.ve-readout { display: flex; flex-wrap: wrap; gap: var(--sp-16); color: var(--text-2); font-size: var(--text-caption); }
+.ve-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-8); }
+.ve-check { display: inline-flex; align-items: center; gap: var(--sp-4); color: var(--text-2); font-size: var(--text-caption); cursor: pointer; }
+.ve-seg-list { display: flex; flex-direction: column; gap: var(--sp-8); max-height: 28vh; overflow: auto; padding-right: var(--sp-4); }
+.ve-seg-row { display: flex; align-items: center; gap: var(--sp-8); }
+.ve-seg-idx { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 999px; background: var(--surface-3); color: var(--text-2); font-size: var(--text-micro); flex: none; }
+.ve-seg-name { flex: 1; min-width: 120px; }
+.ve-seg-row .muted { flex: none; }

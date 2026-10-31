@@ -10,6 +10,7 @@ import { Thumb } from './assets.tsx';
 import { Icon } from './ui/Icon.tsx';
 import { Segmented, SearchBox, tip, clipTip } from './ui/controls.tsx';
 import { toast, openModal, openMenu, confirmDialog, copyText } from './ui/layers.tsx';
+import { openVideoEditor } from './editor/VideoEditor.tsx';
 import { enter } from './ui/motion.ts';
 import { FailureState, explainFailure, refundNote } from './ui/states.tsx';
 import { setForm, setStudio, setFlow, submit, useImageForVideo, useVideoForMusic } from './composer/state.ts';
@@ -540,6 +541,11 @@ function Detail({ item, close, nav }: { item: HistoryItem; close: () => void; na
         </button>
       )}
       {leaveTo('复用参数', reuse)}
+      {done(item) && item.kind === 'video' && item.savedLocally && (
+        <button className="btn" type="button" onClick={() => openVideoEditor(item.mediaUrl!, nameOf(item), () => loadHistory())}>
+          剪辑
+        </button>
+      )}
       {done(item) && item.kind === 'video' && (item.extraFiles?.length || 0) > 0 && (
         <button className="btn" type="button" onClick={() => downloadAll(item)}>
           下载全部（{(item.extraFiles?.length || 0) + 1} 个）

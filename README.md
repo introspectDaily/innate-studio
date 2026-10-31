@@ -271,6 +271,27 @@ This project follows strict UI and interaction guidelines (color tokens, 6-step 
 
 ---
 
+## 🤖 Agent / Skills 接入
+
+本机已暴露一套 JSON 接口，可被 Codex、Claude Code 等编程客户端通过 **Agent Skills** 直接调用——无需 MCP。技能说明在 [`.claude/skills/innate-studio/SKILL.md`](.claude/skills/innate-studio/SKILL.md)，并已软链到 `.agents/skills/` 供 Codex 读取。
+
+**首选用自带 CLI**（`cli/innate.mjs`，零依赖）。它会被装成一个全局命令 `innate`——装完之后在任何目录直接敲就行，**不需要 pnpm，也不需要站在项目目录里**：
+
+```bash
+node cli/install.mjs          # 只需一次；--dir <目录> 指定位置，--uninstall 卸载
+innate --help
+```
+
+接入三步：
+
+1. **建令牌**：多人模式在「设置 → Agent Keys」创建，本机模式用 `pnpm user token add [--scope read|write]`。令牌形如 `isk_…`，绑定到某个用户（本机模式为本地 Agent），空间隔离、积分、角色全部继承。
+2. **记住一次**：`innate config set --key isk_…`（写入 `~/.innate/config.json`，权限 600）。服务地址会自动发现（服务启动时把监听地址写进数据目录的 `server.json`），改了 `PORT` 不用另外配置；临时覆盖用 `--api-url` 或环境变量。`scope=read` 的令牌只能读，生成/上传需 `scope=write`。
+3. **调用与拿结果**：例如 `innate generate image --model seedream-5.0-pro --prompt "猫" --wait`、`innate canvas grid --ids r1,r2,r3 --cols 3`（一条命令完成建画布 + 网格精确摆放）。`--wait` 会调 `POST /api/history/<id>/refresh?wait=60` 阻塞等到完成，返回里的 `localPath` 是结果在本机的绝对路径，同一台机器可直接读取。
+
+连不上时先跑 `innate doctor`，它会报出服务地址、连通性、身份和下一步该做什么。
+
+详见技能文件中的命令清单、无限画布节点坐标写法与最小闭环示例。
+
 ## 📄 License & Acknowledgements
 
 - Core source code is licensed under the [MIT License](LICENSE).

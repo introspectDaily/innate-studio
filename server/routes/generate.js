@@ -63,7 +63,7 @@ route('POST', /^\/api\/videos$/, async ({ req, space, user }) => {
   syncCredits(space, item);
   space.history.unshift(item);
   space.save('history');
-  return historyView(item);
+  return historyView(item, undefined, space);
 });
 
 // 把页面发来的视频请求换成火山方舟的格式：提示词和素材都放进 content 数组，每份素材用 role 说明它的用途。
@@ -99,20 +99,28 @@ function minimaxVideoRequest(payload) {
 // ---------- 生成记录 ----------
 
 // 多人模式下带上这个人剩多少积分：页面本来就一直在读记录，余额跟着它更新。
-route('GET', /^\/api\/history$/, async ({ space, user }) => ({ items: space.history.map((item) => historyView(item, user)), ...(user ? { credits: balanceOf(user.id) } : {}) }));
+route('GET', /^\/api\/history$/, async ({ space, user }) => ({ items: space.history.map((item) => historyView(item, user, space)), ...(user ? { credits: balanceOf(user.id) } : {}) }));
 
-route('POST', /^\/api\/history\/([^/]+)\/refresh$/, async ({ params, space, user }) => {
+// 刷新一条记录。带 ?wait=N（秒，最多 60）时服务端长轮询：一直查到完成/失败或超时再返回，
+// 这样 Agent 用 curl 调一次就能拿到结果，不用自己 sleep 循环。
+route('POST', /^\/api\/history\/([^/]+)\/refresh$/, async ({ params, space, user, query }) => {
   const item = space.history.find((h) => h.id === params[0]);
   if (!item) throw new HttpError(404, 'not_found', '记录不存在');
   // direct 的记录没有任务可查；别的平台留下的记录也查不了。
-  if (item.direct || isLegacy(item)) return historyView(item, user);
-  if (isPending(item) || isTimedOut(item)) {
-    await pollTask(space, item);
-  } else if (item.status === 'completed' && !item.localFile) {
-    item.downloadAttempts = 0;
-    await downloadResult(space, item);
-  }
-  return historyView(item, user);
+  if (item.direct || isLegacy(item)) return historyView(item, user, space);
+  const deadline = Date.now() + Math.min(Number(query.get('wait')) || 0, 60) * 1000;
+  do {
+    if (isPending(item) || isTimedOut(item)) {
+      await pollTask(space, item);
+    } else if (item.status === 'completed' && !item.localFile) {
+      item.downloadAttempts = 0;
+      await downloadResult(space, item);
+    }
+    if (item.status === 'completed' || item.status === 'failed') break;
+    if (Date.now() >= deadline) break;
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+  } while (Date.now() < deadline);
+  return historyView(item, user, space);
 });
 
 route('DELETE', /^\/api\/history\/([^/]+)$/, async ({ params, space }) => {
@@ -290,7 +298,7 @@ route('POST', /^\/api\/audio\/speech$/, async ({ req, space, user }) => {
     const { audio, usage } = await doubaoSpeech(script, voiceId);
     finishItem(space, item, audio, 'mp3', usage ? { usage } : {});
   });
-  return historyView(item);
+  return historyView(item, user, space);
 });
 
 // 音效和配乐是同一个模型（seed-audio-1.0），区别只在怎么跟它说：要音效时说明不要人声和音乐，要配乐时说明是没有人声的纯音乐。
@@ -314,7 +322,7 @@ function submitAudio(space, user, { tool, prompt, request, payload, form }) {
     const { audio, usage } = await doubaoAudio(request);
     finishItem(space, item, audio, 'mp3', usage ? { usage } : {});
   });
-  return historyView(item);
+  return historyView(item, user, space);
 }
 
 route('POST', /^\/api\/audio\/sfx$/, async ({ req, space, user }) => {

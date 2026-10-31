@@ -30,6 +30,16 @@ export interface TextData {
   busy?: string;
   error?: string;
 }
+// 节点里曾经有过、后来被换掉的那一份内容。就地替换时旧的退到这里，「更多 → 历史版本」里随时换得回来。
+export interface Kept {
+  recordId?: string;
+  upload?: { url: string; name: string };
+  // 换下来的时间。生成记录本身还有生成时间，列表里有记录就用记录的时间。
+  at: number;
+}
+// 每个节点留最近这么几份，再多就扔掉最早的：生成记录本身还在创作记录里，不会真丢。
+export const KEPT_LIMIT = 12;
+
 // 节点里的内容有两种来历，只会有一种：recordId 是在这个节点上生成的那条生成记录；upload 是从本机上传的文件。
 // busy、error 只在页面打开期间有，不存进画布。
 export interface Generated {
@@ -37,8 +47,38 @@ export interface Generated {
   no?: number;
   recordId?: string;
   upload?: { url: string; name: string };
+  // 这个节点再次生成的结果放在哪：true 就地替换，false 另开一个新节点。不写就跟随设置里的默认（另开新节点）。
+  inPlace?: boolean;
+  // 换下来的内容，最近的在前。
+  kept?: Kept[];
   busy?: string;
   error?: string;
+}
+
+// 节点现在放着的那一份内容。空节点是 null。
+export function contentOf(data: { recordId?: string; upload?: { url: string; name: string } }): Kept | null {
+  if (data.recordId) return { recordId: data.recordId, at: 0 };
+  if (data.upload) return { upload: data.upload, at: 0 };
+  return null;
+}
+
+const sameKept = (a: Kept, b: Kept | null) => Boolean(b && ((a.recordId != null && a.recordId === b.recordId) || (a.upload != null && b.upload != null && a.upload.url === b.upload.url)));
+
+// 换掉内容之前先留底：旧的挪进 kept 最前面，同一份不重复记，新的那份（换回来时就是它自己）从历史里去掉。
+// 换的是同一份内容（比如重试同一条记录）就原样返回，不记历史。
+export function keepBefore<T extends { recordId?: string; upload?: { url: string; name: string } }>(data: Generated, patch: T): T & { kept?: Kept[] } {
+  const old = contentOf(data);
+  const next = contentOf(patch);
+  if (!old || sameKept(old, next)) return patch;
+  const rest = (data.kept || []).filter((item) => !sameKept(item, old) && !sameKept(item, next));
+  return { ...patch, kept: [{ ...old, at: Date.now() }, ...rest].slice(0, KEPT_LIMIT) };
+}
+
+// 这个节点的历史版本。老存档里还有一个只记上传原图的 origin，并进来看。
+export function keptOf(data: Generated): Kept[] {
+  const list = data.kept || [];
+  const legacy = (data as { origin?: { url: string; name: string } }).origin;
+  return legacy && !list.some((item) => item.upload?.url === legacy.url) ? [...list, { upload: legacy, at: 0 }] : list;
 }
 export interface ImageData extends Generated {
   prompt: string;
@@ -225,6 +265,32 @@ export function nodeWidth(kind: NodeKind, data: { aspect?: number } = {}) {
   if (kind === 'audio') return 320;
   const shape = data.aspect || (kind === 'video' ? 16 / 9 : 1);
   return Math.round(Math.min(560, Math.max(150, BOX_HEIGHT * shape)));
+}
+
+// 框变宽之后给右边腾位置。
+// 框的宽度是按内容的实际比例算的：图片 1:1 是 240，换成一张 16:9 的（上传的、生成出来的）就变成 427。
+// 位置是记死的，框一宽就伸到右边那个节点底下，把连到它的线整个压在框底下——看上去就是「线没了」。
+// 所以变宽多少，右边同一排的节点就整体右移多少，原来的间距一点不变；窄了不往回拉，留给用户自己整理。
+export function makeRoom(
+  nodes: { id: string; position: { x: number; y: number }; width: number }[],
+  changed: { id: string; position: { x: number; y: number } },
+  oldWidth: number,
+  newWidth: number,
+): Map<string, { x: number; y: number }> {
+  const moved = new Map<string, { x: number; y: number }>();
+  const delta = newWidth - oldWidth;
+  if (delta <= 0) return moved;
+  const right = changed.position.x + oldWidth;
+  const top = changed.position.y;
+  for (const node of nodes) {
+    if (node.id === changed.id) continue;
+    // 只动同一排的：上下有一段重叠就算一排。
+    if (node.position.y >= top + TITLE_ROOM + BOX_HEIGHT || node.position.y + TITLE_ROOM + BOX_HEIGHT <= top) continue;
+    // 本来就在左边（或者早就压着了）的不动。
+    if (node.position.x < right) continue;
+    moved.set(node.id, { x: node.position.x + delta, y: node.position.y });
+  }
+  return moved;
 }
 
 // ---------- 拖动时对齐 ----------
@@ -480,8 +546,10 @@ export interface Clip {
 // 复制下来的是选中的节点，和两头都在其中的连线；连着外部上游输入的线记在 upstream 里（分支复制时可继承）。
 export function clipOf(nodes: Piece[], edges: Wire[]): Clip {
   const ids = new Set(nodes.map((node) => node.id));
+  // 历史版本是那个节点自己的，复制、粘贴、存成工作流都不带着走。
+  const piece = ({ kept: _kept, ...rest }: Record<string, unknown>) => rest;
   return {
-    nodes: nodes.map(({ id, type, position, data, hidden }) => ({ id, type, position: { ...position }, data: stripNodeData(data), ...(hidden ? { hidden } : {}) })),
+    nodes: nodes.map(({ id, type, position, data, hidden }) => ({ id, type, position: { ...position }, data: piece(stripNodeData(data) as Record<string, unknown>), ...(hidden ? { hidden } : {}) })),
     edges: edges.filter((edge) => ids.has(edge.source) && ids.has(edge.target)).map(({ id, source, target, data }) => ({ id, source, target, data })),
     upstream: edges.filter((edge) => !ids.has(edge.source) && ids.has(edge.target)).map(({ id, source, target, data }) => ({ id, source, target, data })),
   };

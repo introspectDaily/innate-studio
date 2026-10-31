@@ -184,5 +184,5 @@ route('POST', /^\/api\/autodl\/submit$/, async ({ req, space, user }) => {
   syncCredits(space, item);
   space.history.unshift(item);
   space.save('history');
-  return historyView(item, user);
+  return historyView(item, user, space);
 });

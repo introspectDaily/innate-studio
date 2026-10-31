@@ -4,6 +4,9 @@
   "private": true,
   "description": "Innate Studio: 本地优先的 AIGC 多模态创作工作台（Seedance 2.5/2.0、Seedream 5.0、无限节点画布）",
   "license": "MIT",
+  "bin": {
+    "innate": "cli/innate.mjs"
+  },
   "scripts": {
     "start": "vite build && node server.js",
     "build": "vite build",
@@ -12,6 +15,8 @@
     "test": "tsc -p tsconfig.json && node --test test/*.test.js",
     "dev:mock": "vite build && node test/run-with-mock.js",
     "user": "node server/users-cli.js",
+    "agent": "node cli/innate.mjs",
+    "agent:install": "node cli/install.mjs",
     "walkthrough": "node test/ui-walkthrough.mjs"
   },
   "engines": {
@@ -20,6 +25,9 @@
   "packageManager": "pnpm@11.15.1",
   "type": "module",
   "dependencies": {
+    "@ffmpeg/core": "^0.12.6",
+    "@ffmpeg/ffmpeg": "^0.12.10",
+    "@ffmpeg/util": "^0.12.1",
     "@volcengine/tos-sdk": "2.9.1",
     "@xyflow/react": "^12.12.0",
     "react": "^19.3.0",

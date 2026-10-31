@@ -1491,7 +1491,7 @@ function Board({ id, onExit }: { id: string; onExit: () => void }) {
               </svg>
             </ViewportPortal>
           )}
-          {showMap && <MiniMap pannable zoomable position="bottom-left" style={{ width: 168, height: 112 }} />}
+          {showMap && <MiniMap pannable zoomable position="bottom-right" style={{ width: 168, height: 112 }} />}
           {finding && (
             <Panel position="top-center" className="canvas-find">
               <Finder nodes={nodes.filter((node) => !isGroup(node) && !isStack(node) && !node.hidden)} onJump={jumpTo} onClose={() => setFinding(false)} />

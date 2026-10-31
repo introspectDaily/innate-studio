@@ -7,3 +7,5 @@ test/.tmp/
 # 依赖和页面的构建结果
 node_modules/
 web/dist/
+.workbuddy
+.agents/skills/innate-studio

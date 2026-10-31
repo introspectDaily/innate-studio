@@ -1,8 +1,9 @@
 // 设置弹窗：外观、润色用的模型，和多人模式下自己的账号。Key、余额、成员在「管理」里（admin.tsx），只有管理员打得开。
 
 import { lazy, Suspense, useState } from 'react';
-import { state, useStore, polishModel, setPolishModel } from './store.ts';
+import { state, useStore, polishModel, setPolishModel, canvasPlace, setCanvasPlace } from './store.ts';
 import { AccountSection } from './account.tsx';
+import { AgentKeysSection } from './agent-keys.tsx';
 import { themeChoice, setTheme } from './theme.ts';
 import { Segmented, FormRow, Dropdown } from './ui/controls.tsx';
 import { openModal } from './ui/layers.tsx';
@@ -13,11 +14,14 @@ function Settings() {
   useStore('app', 'models');
   const [theme, setThemeState] = useState(themeChoice());
   const [polish, setPolish] = useState(polishModel());
+  const [place, setPlace] = useState(canvasPlace());
   const models = state.catalog.polish;
 
   return (
     <div className="settings">
       {state.app.user && <AccountSection />}
+
+      <AgentKeysSection />
 
       <section className="settings-group">
         <h3>通用</h3>
@@ -51,6 +55,20 @@ function Settings() {
             ) : (
               <span className="muted">{state.catalog.known ? '暂无可用的文本模型' : '加载中…'}</span>
             )}
+          </FormRow>
+          {/* 画布上改了提示词再点生成，结果放在哪。空节点总是把结果放进它自己，这里只管已经有内容的时候。 */}
+          <FormRow label="画布再次生成" desc="节点里已经有内容时，新结果放哪。单个节点可以在「更多」里另行指定。">
+            <Segmented
+              options={[
+                { value: 'new', label: '另开节点' },
+                { value: 'here', label: '就地替换' },
+              ]}
+              value={place}
+              onChange={(next) => {
+                setCanvasPlace(next);
+                setPlace(next);
+              }}
+            />
           </FormRow>
         </div>
       </section>

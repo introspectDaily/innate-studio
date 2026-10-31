@@ -2,7 +2,7 @@
 // 结果是一条普通的生成记录，节点只记它的 id，进度跟着「创作记录」的轮询走。
 
 import type { Edge, Node, ReactFlowInstance } from '@xyflow/react';
-import { api, state, KINDS, startHistoryLoop, loadHistory, polishModel, canManage, usesCredits, flowModelsOf, flowSummary, flowReady } from '../store.ts';
+import { api, state, KINDS, startHistoryLoop, loadHistory, polishModel, canManage, usesCredits, flowModelsOf, flowSummary, flowReady, canvasPlace } from '../store.ts';
 import { fmtCredits, fmtYuan } from '../format.ts';
 import { quoteCost, toCredits } from '../../../shared/models.ts';
 import { durationOf, flowInputs, isFlowModel, workflowCost, type FlowMedia } from '../../../shared/autodl.ts';
@@ -11,7 +11,7 @@ import { buildVideoRequest, buildImageRequest, buildSpeechRequest, buildSfxReque
 import { recordName } from '../media.ts';
 import { confirmDialog, toast } from '../ui/layers.tsx';
 import type { HistoryItem, Kind, Ref } from '../types.ts';
-import { BOX_HEIGHT, NODE_LABELS, TITLE_ROOM, joinPrompt, nodeWidth, numbered, placeResults, resolveMentions, runOrder, stripNodeData, videoFormFrom, type AudioData, type ImageData, type LinkData, type MediaInput, type NodeKind, type TextData, type VideoData } from './model.ts';
+import { BOX_HEIGHT, NODE_LABELS, TITLE_ROOM, joinPrompt, keepBefore, nodeWidth, numbered, placeResults, resolveMentions, runOrder, stripNodeData, videoFormFrom, type AudioData, type ImageData, type LinkData, type MediaInput, type NodeKind, type TextData, type VideoData } from './model.ts';
 
 type Flow = ReactFlowInstance<Node, Edge>;
 type AnyData = Partial<ImageData & VideoData & AudioData & TextData>;
@@ -172,26 +172,40 @@ export function isFilled(data: AnyData) {
   return Boolean(data.upload || (record && record.status !== 'failed') || (data.text || '').trim());
 }
 
-// 把一批结果放上画布。节点还空着，第一份放进它自己；已经有内容，原来的留着不动。其余每份一个新节点：
-// 参数和提示词照抄原节点，连进原节点的线也照样连进它，排在原节点下面。snap 是撤销用的那一下。
-export function deliver(flow: Flow, id: string, results: Record<string, unknown>[], snap: () => void) {
+// 一个节点再次生成时，结果放哪：节点上单独选过就按节点，没选过跟随设置里的默认（另开新节点）。
+export function inPlaceOf(data: AnyData) {
+  return data.inPlace ?? canvasPlace() === 'here';
+}
+
+// 把一批结果放上画布。空节点总是把结果放进它自己。已经有内容时看落点：
+// 就地替换（inPlace）就换掉它原来那份，旧的退进「历史版本」；否则每份结果各开一个新节点，原节点留着不动。
+// 新节点的参数和提示词照抄原节点，连进原节点的线也照样连进它，排在原节点下面。snap 是撤销用的那一下。
+// append：盒子里的东西是用户自己写的，生成的结果不覆盖它，另开一个节点（文本节点手写的正文就是这样）。
+export function deliver(flow: Flow, id: string, results: Record<string, unknown>[], snap: () => void, append = false) {
   const node = flow.getNode(id);
   if (!node || !results.length) return;
+  const before = node.data as AnyData;
   const width = (n: Node) => n.measured?.width || nodeWidth(n.type as NodeKind, n.data);
   const rowStep = Math.max(TITLE_ROOM + BOX_HEIGHT + 56, (node.measured?.height || (TITLE_ROOM + BOX_HEIGHT + 240)) + 48);
+  // 已经有内容、又不想覆盖它，那一份也不放进这个节点：全部各开新节点。
+  const separate = append || (isFilled(before) && !inPlaceOf(before));
   const { here, spots } = placeResults(
     { id, position: node.position, width: width(node) },
-    isFilled(node.data as AnyData),
+    separate,
     results.length,
     flow.getNodes().filter((n) => n.type !== 'group' && !n.hidden).map((n) => ({ id: n.id, position: n.position, width: width(n) })),
     rowStep
   );
-  if (here >= 0) flow.updateNodeData(id, results[here]);
+  // 换掉原来那份：它退进历史版本，随时能换回来。原来那份是失败的结果就不留了。
+  if (here >= 0) {
+    const patch = { ...results[here], upload: undefined };
+    flow.updateNodeData(id, isFilled(before) ? keepBefore(before, patch) : patch);
+  }
   const rest = results.filter((_, index) => index !== here);
   if (!rest.length) return;
   snap();
-  // 新节点不带原节点的那份内容，也不带「一次几张」：再点它生成，默认只出一份。
-  const base = { ...stripNodeData(node.data), recordId: undefined, upload: undefined, aspect: undefined, count: undefined, no: undefined };
+  // 新节点不带原节点的那份内容、历史版本，也不带「一次几张」：再点它生成，默认只出一份。
+  const base = { ...stripNodeData(node.data), recordId: undefined, upload: undefined, kept: undefined, aspect: undefined, count: undefined, no: undefined };
   const fresh = numbered(rest.map((result, index) => ({ id: crypto.randomUUID(), type: node.type, position: spots[index], data: { ...base, ...result } }) as Node), flow.getNodes());
   const incoming = flow.getEdges().filter((edge) => edge.target === id);
   flow.addNodes(fresh);
@@ -242,9 +256,8 @@ export async function generate(flow: Flow, id: string, snap: () => void = () => 
     else if (kind === 'image') ids = await submitImage(node, sources, prompt, once.refs);
     else if (kind === 'video') ids = await submitEach(count, say, (report) => submitVideo(node, sources, prompt, report));
     else ids = [await submitAudio(node, prompt)];
-    // 音频还是在原节点上换成新的；图片、视频已经有内容时不覆盖，新结果放进新节点。
-    if (kind === 'audio') flow.updateNodeData(id, { recordId: ids[0], upload: undefined });
-    else deliver(flow, id, ids.map((recordId) => ({ recordId, upload: undefined })), snap);
+    // 图片、视频、音频都一样：空节点直接把结果放进去；已经有内容时按节点（或设置）选的落点，就地替换或另开新节点。
+    deliver(flow, id, ids.map((recordId) => ({ recordId, upload: undefined })), snap);
     await loadHistory().catch(() => {});
     startHistoryLoop();
   } catch (err) {
@@ -274,7 +287,8 @@ async function write(flow: Flow, id: string, snap: () => void) {
     const { prompt: ask, inlined } = resolveMentions(prompt, sources.map((s) => ({ name: nameOf(s.node), kind: 'text' as const, text: (s.node.data as AnyData).text })));
     const upstream = sources.filter((s) => !inlined.has(nameOf(s.node))).map((s) => (s.node.data as AnyData).text || '');
     const result = await api<{ text: string }>('POST', '/api/text', { prompt: ask, context: joinPrompt(upstream, data.text || ''), model });
-    deliver(flow, id, [{ text: result.text }], snap);
+    // 框里这段字如果是自己手写的，模型写的另开一个节点，别把手写的稿子冲掉；本来就是模型写的，按落点设置走。
+    deliver(flow, id, [{ text: result.text }], snap, Boolean((data.text || '').trim()));
   } catch (err) {
     flow.updateNodeData(id, { error: (err as Error).message });
     toast((err as Error).message, 'error', 6000);

@@ -3,9 +3,9 @@
 // 左右两个加号是连接点：拖出去连到别的节点，点一下是在那一侧接一个新节点。
 // 跟着画布缩放的只有框和里面的内容；名字、加号、操作条、输入面板在屏幕上的大小不变，缩得再小也看得清、点得到。
 
-import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { BaseEdge, Handle, NodeToolbar, Position, getBezierPath, useConnection, useEdges, useInternalNode, useReactFlow, useStore as useFlowStore, useUpdateNodeInternals, type ConnectionLineComponentProps, type EdgeProps, type Node, type NodeProps } from '@xyflow/react';
-import { state, useStore, loadVoices, isPendingTask, polishModel, modelOption, flowModelsOf, flowModelLabel, flowSummary, flowReady, KINDS as MEDIA } from '../store.ts';
+import { state, useStore, loadVoices, isPendingTask, polishModel, modelOption, flowModelsOf, flowModelLabel, flowSummary, flowReady, canvasPlace, KINDS as MEDIA } from '../store.ts';
 import { RATIOS, fitImageQuality, fitImageSize, hasLastFrame, imageQualities, imageRatios, imageRefLimit, imageSizes, specOf, voiceName } from '../composer/state.ts';
 import { IMAGE_QUALITY_LABELS, modelLabel, modelNote } from '../../../shared/models.ts';
 import { flowMediaKeys, isFlowModel, ruleDefault, ruleLabel } from '../../../shared/autodl.ts';
@@ -19,8 +19,9 @@ import { openMenu, openModal, openPopover, toast } from '../ui/layers.tsx';
 import { VideoPlayer, AudioPlayer } from '../player.tsx';
 import { openDetail } from '../history.tsx';
 import type { Kind, Ref } from '../types.ts';
-import { BOX_HEIGHT, IMAGE_PRESETS, NODE_LABELS, OUTPAINT_PROMPT, ROLE_LABELS, canLink, nodeWidth, linkLabel, PINS, PIN_LABELS, type AudioData, type FrameRole, type GroupData, type ImageData, type Pin, type Preset, type StackData, type LinkData, type NodeKind, type TextData, type VideoData } from './model.ts';
-import { fitVideo, generate, nameOf, outputOf, recordOf, runAll } from './run.ts';
+import { BOX_HEIGHT, IMAGE_PRESETS, NODE_LABELS, OUTPAINT_PROMPT, ROLE_LABELS, canLink, keepBefore, keptOf, makeRoom, nodeWidth, linkLabel, PINS, PIN_LABELS, type AudioData, type FrameRole, type Generated, type GroupData, type ImageData, type Pin, type Preset, type StackData, type LinkData, type NodeKind, type TextData, type VideoData } from './model.ts';
+import { fitVideo, generate, isFilled, nameOf, outputOf, recordOf, runAll } from './run.ts';
+import { openKept } from './kept.tsx';
 import { Cropper, cropImage, grabFrame, padImage, splitGrid, type Made } from './edit.tsx';
 import { reducedMotion } from '../ui/motion.ts';
 
@@ -537,7 +538,7 @@ function Clip({ src, label, onShape }: { src: string; label: string; onShape?: (
 function NodeTools({ id, kind, data, onUpload }: { id: string; kind: Kind; data: MediaData; onUpload?: () => void }) {
   const flow = useReactFlow();
   const { addBeside, addNodeBeside, continueVideo, snap } = useContext(CanvasActions);
-  useStore('history', 'app');
+  useStore('history', 'app', 'prefs');
   const record = recordOf(data);
   // 这个节点里现在放着的东西：生成的结果，或者上传的文件。
   const done = record?.status === 'completed' && record.mediaUrl ? record : null;
@@ -620,12 +621,18 @@ function NodeTools({ id, kind, data, onUpload }: { id: string; kind: Kind; data:
   }
   // 切宫格、扩图各有几个选项，点了再出第二层菜单。
   const ratios = imageRatios((data as ImageData).model).filter((r) => ['1:1', '16:9', '9:16', '4:3', '3:4', '21:9'].includes(r));
-  const submenu = (button: HTMLElement | null, label: string, options: { value: string; label: string }[], run: (value: string) => void) => button && setTimeout(() => openMenu(button, { label, items: options, onSelect: run }), 0);
+  const submenu = (button: HTMLElement | null, label: string, options: { value: string; label: string; selected?: boolean }[], run: (value: string) => void) => button && setTimeout(() => openMenu(button, { label, items: options, onSelect: run }), 0);
   const moreButton = useRef<HTMLButtonElement>(null);
+  // 换下来过的内容（就地替换、上传替换都会留一份）。有就多一项「历史版本」。
+  const kept = keptOf(data as Generated);
+  // 再次生成的结果放在哪：这个节点单独选过按它，没选过跟随设置。
+  const place = data.inPlace ?? canvasPlace() === 'here';
   const items = [
     ...(local && kind === 'image' ? [{ value: 'crop', label: '裁剪' }, { value: 'grid', label: '切成宫格…' }, ...(ratios.length ? [{ value: 'outpaint', label: '扩图…' }] : [])] : []),
     ...(local && kind === 'video' ? [{ value: 'extend', label: '延长' }, { value: 'frame', label: '截取当前帧' }, { value: 'first', label: '截取首帧' }, { value: 'last', label: '截取尾帧' }] : []),
     ...(file ? [{ value: 'download', label: '下载' }] : []),
+    ...(kept.length ? [{ value: 'kept', label: '历史版本…', note: String(kept.length) }] : []),
+    { value: 'place', label: `再次生成：${place ? '就地替换' : '另开节点'}…` },
     ...(onUpload ? [{ value: 'upload', label: file ? '替换图片' : '上传图片' }] : []),
   ];
   const acts: Record<string, () => void> = {
@@ -637,6 +644,19 @@ function NodeTools({ id, kind, data, onUpload }: { id: string; kind: Kind; data:
     first: () => make('截帧', async () => [await grabFrame(file!.url, 0, `${file!.name}-首帧`)]),
     last: () => make('截帧', async () => [await grabFrame(file!.url, 'last', `${file!.name}-尾帧`)]),
     download,
+    kept: () => openKept({ id, kind, data: data as Generated, flow }),
+    // 三选一：跟随设置（不写进节点）、就地替换、另开新节点。选中的那一项打勾，不会再点出动作。
+    place: () =>
+      submenu(
+        moreButton.current,
+        '再次生成的结果',
+        [
+          { value: 'follow', label: `跟随设置（${canvasPlace() === 'here' ? '就地替换' : '另开节点'}）`, selected: data.inPlace === undefined },
+          { value: 'here', label: '就地替换', selected: data.inPlace === true },
+          { value: 'new', label: '另开新节点', selected: data.inPlace === false },
+        ],
+        (value) => flow.updateNodeData(id, { inPlace: value === 'follow' ? undefined : value === 'here' }),
+      ),
     upload: () => onUpload?.(),
   };
   const act = (value: string) => acts[value]?.();
@@ -674,6 +694,39 @@ function useWorking(data: MediaData) {
   useStore('history', 'app');
   const record = recordOf(data);
   return Boolean(data.busy) || Boolean(record && isPendingTask(record));
+}
+
+// 框的宽度按内容的实际比例定（见 model.ts 的 nodeWidth）。换上一张更宽的图——上传的或者生成出来的——
+// 框就从 240 长到 427 这样，位置却是记死的，于是伸到右边那个节点底下，连到它的线整个被压在框里，看上去就是「线不见了」。
+// 所以框变宽多少，右边同一排的节点就整体右移多少，原来的间距不变。变窄不往回拉，留给用户自己整理。
+function useShape(id: string) {
+  const flow = useReactFlow();
+  const { snap } = useContext(CanvasActions);
+  return useCallback(
+    (aspect: number) => {
+      const node = flow.getNode(id);
+      if (!node) return;
+      const kind = node.type as NodeKind;
+      if (Math.abs(aspect - Number((node.data as { aspect?: number }).aspect || 0)) < 0.01) return;
+      const before = nodeWidth(kind, node.data as { aspect?: number });
+      const after = nodeWidth(kind, { aspect });
+      if (after > before) {
+        snap();
+        const moved = makeRoom(
+          flow
+            .getNodes()
+            .filter((n) => n.type !== 'group' && !n.hidden)
+            .map((n) => ({ id: n.id, position: n.position, width: n.measured?.width || nodeWidth(n.type as NodeKind, n.data) })),
+          node,
+          before,
+          after,
+        );
+        if (moved.size) flow.setNodes((items) => items.map((n) => (moved.has(n.id) ? { ...n, position: moved.get(n.id)! } : n)));
+      }
+      flow.updateNodeData(id, { aspect });
+    },
+    [flow, id, snap],
+  );
 }
 
 const promptHint = (linked: boolean, own: string) => (linked ? '补充提示词（可选）' : own);
@@ -797,6 +850,7 @@ export function ImageNode({ id, data: raw, selected, dragging }: NodeProps) {
   const refLimit = isFlow ? flowMediaKeys(flowSummary(data.model)?.rules || {}, 'image').length : imageRefLimit(data.model);
   const flowGroups = flowParamGroups(data.model, data.flowValues, (next) => flow.updateNodeData(id, { flowValues: next }));
   const { snap } = useContext(CanvasActions);
+  const shape = useShape(id);
   const selfNode = flow.getNode(id);
   const selfOutput = selfNode ? outputOf(selfNode) : (data.upload ? { url: data.upload.url, kind: 'image' as const, name: data.upload.name } : null);
   const usesSelfRef = Boolean(
@@ -813,7 +867,10 @@ export function ImageNode({ id, data: raw, selected, dragging }: NodeProps) {
     flow.updateNodeData(id, { busy: '正在上传', error: '', ignoreSelfRef: false });
     try {
       const ref = await uploadLocalFile(picked, 'image');
-      flow.updateNodeData(id, { upload: { url: ref.url, name: ref.name }, recordId: undefined, ignoreSelfRef: false });
+      // 框里原来有内容（生成的、上传的都算）：它退进历史版本，随时换得回来。
+      const now = (flow.getNode(id)?.data || data) as ImageData;
+      const patch = { upload: { url: ref.url, name: ref.name }, recordId: undefined, ignoreSelfRef: false };
+      flow.updateNodeData(id, isFilled(now) ? keepBefore(now, patch) : patch);
     } catch (err) {
       toast((err as Error).message, 'error', 6000);
     } finally {
@@ -866,7 +923,7 @@ export function ImageNode({ id, data: raw, selected, dragging }: NodeProps) {
           e.target.value = '';
         }}
       />
-      <Result kind="image" data={data} onShape={(aspect) => Math.abs(aspect - (data.aspect || 0)) > 0.01 && flow.updateNodeData(id, { aspect })} />
+      <Result kind="image" data={data} onShape={shape} />
     </Frame>
   );
 }
@@ -1077,6 +1134,7 @@ export function VideoNode({ id, data: raw, selected, dragging }: NodeProps) {
   // 模型是工作流时，它自己的枚举、开关参数（模式、风格预设…）也放进「参数」：键就是规则里的参数名。分辨率、时长用节点上直接的那两个。
   const flowGroups = flowParamGroups(data.model, data.flowValues, (next) => set({ flowValues: next }), ['resolution']);
   const { snap } = useContext(CanvasActions);
+  const shape = useShape(id);
   const hasSelfRef = Boolean(data.selfFrame || data.selfRole);
   const modelCount = models.length;
   // 目录晚于节点到达（或者只配了 AutoDL.art 的令牌，型号全不可用）时，节点可能还没选模型：
@@ -1116,7 +1174,7 @@ export function VideoNode({ id, data: raw, selected, dragging }: NodeProps) {
         </>
       }
     >
-      <Result kind="video" data={data} onShape={(aspect) => Math.abs(aspect - (data.aspect || 0)) > 0.01 && set({ aspect })} />
+      <Result kind="video" data={data} onShape={shape} />
     </Frame>
   );
 }
@@ -1129,6 +1187,7 @@ export function AudioNode({ id, data: raw, selected, dragging }: NodeProps) {
   const linked = useInputs(id).some((i) => i.link.kind === 'text');
   const working = useWorking(data);
   const [, redraw] = useState(0);
+  const { snap } = useContext(CanvasActions);
   useStore('app', 'flows');
   // 音频节点的模型：语音、音效两个内置的，加上 AutoDL.art 上出音频的工作流。选了工作流，节点按它的规则出。
   const flows = flowModelsOf('audio');
@@ -1171,7 +1230,7 @@ export function AudioNode({ id, data: raw, selected, dragging }: NodeProps) {
           <Refs id={id} kind="audio" />
           <Prompt id={id} value={data.prompt} placeholder={promptHint(linked, speech ? '输入朗读文本' : '描述声音的来源、材质与动作')} />
           {data.error && !data.busy && <p className="cnode-error">{data.error}</p>}
-          <Bar working={working} ready={Boolean(data.prompt.trim()) || linked} action={isFlow ? '运行工作流' : speech ? '生成语音' : '生成音效'} onSend={() => generate(flow, id)}>
+          <Bar working={working} ready={Boolean(data.prompt.trim()) || linked} action={isFlow ? '运行工作流' : speech ? '生成语音' : '生成音效'} onSend={() => generate(flow, id, snap)}>
             <Dropdown
               variant="tool"
               chevron

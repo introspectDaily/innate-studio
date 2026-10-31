@@ -253,10 +253,12 @@ export function startPolling() {
 
 // mediaUrl 是结果文件的地址，三种类型都有；videoUrl 只有视频有，页面上放视频的地方用它；thumbUrl 是列表里用的小图，没做出来就没有。
 // user 是来看的人。多人模式下平台的原话（error.detail、状态查询失败的原因）只给管理员看，成员只看中文的原因。
-export function historyView(item, user) {
+export function historyView(item, user, space) {
   const kind = item.kind || 'video';
   const mediaUrl = item.localFile ? `/media/${MEDIA_DIRS[kind]}/${item.localFile}` : item.remoteUrl || null;
   const hidden = user && user.role !== 'admin';
+  // 本地优先的最大好处：Agent 在同一台机器上能直接读文件。结果落盘了就给出绝对路径。
+  const localPath = space && item.localFile ? path.join(space.resultDir(item), item.localFile) : null;
   return {
     ...item,
     ...(hidden && item.error?.detail && { error: { message: item.error.message, code: item.error.code } }),
@@ -265,6 +267,7 @@ export function historyView(item, user) {
     mediaUrl,
     videoUrl: kind === 'video' ? mediaUrl : null,
     thumbUrl: item.thumbFile ? `/media/thumbs/${item.thumbFile}` : null,
+    localPath,
     savedLocally: Boolean(item.localFile),
   };
 }

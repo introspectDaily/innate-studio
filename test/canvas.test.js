@@ -2,7 +2,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { alignNodes, canLink, distributeNodes, targetsOf, sourcesOf, linkLabel, joinPrompt, videoFormFrom, stripNodeData, nodeWidth, clipOf, pasteClip, snapTo, tidy, placeResults, groupFrame, runOrder, resolveMentions } from '../web/src/canvas/model.ts';
+import { alignNodes, canLink, contentOf, distributeNodes, keepBefore, keptOf, KEPT_LIMIT, targetsOf, sourcesOf, linkLabel, joinPrompt, videoFormFrom, stripNodeData, nodeWidth, clipOf, pasteClip, snapTo, tidy, placeResults, groupFrame, runOrder, resolveMentions, makeRoom } from '../web/src/canvas/model.ts';
 import { buildVideoRequest } from '../web/src/request.ts';
 
 const base = {
@@ -255,4 +255,74 @@ test('批量对齐与等间距分布：支持左、中、右、顶、中、底�
   assert.equal(distH.get('1').x, 100);
   assert.equal(distH.get('2').x, 350); // 100 + 200 + 50
   assert.equal(distH.get('3').x, 700); // 350 + 300 + 50
+});
+
+test('框变宽：右边同一排的节点整体右移，间距不变；上下别的排和左边的都不动', () => {
+  // 图片节点 a 是 240 宽的方框，右边 360 处接一个视频节点 b（间距 120）。
+  // a 换上一张 16:9 的图之后宽度变成 427，正好把 b 盖住 —— 连到 b 的线也就压在框里看不见了。
+  const nodes = [
+    { id: 'a', position: { x: 0, y: 0 }, width: 240 },
+    { id: 'b', position: { x: 360, y: 0 }, width: 427 },
+    { id: 'c', position: { x: 900, y: 0 }, width: 240 },
+    { id: 'below', position: { x: 360, y: 300 }, width: 240 },
+    { id: 'left', position: { x: -300, y: 0 }, width: 240 },
+  ];
+  const moved = makeRoom(nodes, { id: 'a', position: { x: 0, y: 0 } }, 240, 427);
+  assert.equal(moved.get('b').x, 360 + 187);
+  assert.equal(moved.get('c').x, 900 + 187);
+  assert.equal(moved.get('b').y, 0);
+  assert.ok(!moved.has('below'));
+  assert.ok(!moved.has('left'));
+  assert.ok(!moved.has('a'));
+});
+
+test('框变宽：变窄或者宽度没变，谁都不动', () => {
+  const nodes = [{ id: 'b', position: { x: 360, y: 0 }, width: 240 }];
+  assert.equal(makeRoom(nodes, { id: 'a', position: { x: 0, y: 0 } }, 427, 240).size, 0);
+  assert.equal(makeRoom(nodes, { id: 'a', position: { x: 0, y: 0 } }, 240, 240).size, 0);
+});
+
+test('就地替换：换下来的那份进历史版本，最近的在前', () => {
+  // 节点 a 里先有记录 r1，改成 r2，再改成 r3：r1、r2 依次退进历史。
+  const first = keepBefore({ recordId: 'r1' }, { recordId: 'r2', upload: undefined });
+  assert.deepEqual(first.kept.map((item) => item.recordId), ['r1']);
+  assert.equal(first.recordId, 'r2');
+  const second = keepBefore({ recordId: 'r2', kept: first.kept }, { recordId: 'r3', upload: undefined });
+  assert.deepEqual(second.kept.map((item) => item.recordId), ['r2', 'r1']);
+});
+
+test('就地替换：换的是同一份（比如重试同一条记录）就不记历史', () => {
+  const same = keepBefore({ recordId: 'r1', kept: [] }, { recordId: 'r1' });
+  assert.equal(same.kept, undefined);
+  // 空节点第一次出结果，也没有旧的可留。
+  assert.equal(keepBefore({}, { recordId: 'r9' }).kept, undefined);
+});
+
+test('换回上一版：现在这一版进历史，换回的那一版从历史里拿掉', () => {
+  const data = { recordId: 'r3', kept: [{ recordId: 'r2', at: 1 }, { recordId: 'r1', at: 2 }] };
+  const back = keepBefore(data, { recordId: 'r2', upload: undefined });
+  assert.equal(back.recordId, 'r2');
+  assert.deepEqual(back.kept.map((item) => item.recordId), ['r3', 'r1']);
+});
+
+test('上传替换上传：换下来的那张也在历史里；老存档里只记了 origin 的也并进来', () => {
+  const swapped = keepBefore({ upload: { url: '/a.png', name: 'a' } }, { upload: { url: '/b.png', name: 'b' } });
+  assert.deepEqual(swapped.kept.map((item) => item.upload.url), ['/a.png']);
+  assert.equal(contentOf({ upload: { url: '/b.png', name: 'b' } }).upload.url, '/b.png');
+  assert.deepEqual(keptOf({ origin: { url: '/old.png', name: 'old' } }).map((item) => item.upload.url), ['/old.png']);
+  // 已经在历史里的 origin 不重复列。
+  assert.equal(keptOf({ origin: { url: '/old.png', name: 'old' }, kept: [{ upload: { url: '/old.png', name: 'old' }, at: 1 }] }).length, 1);
+});
+
+test('历史版本最多留最近 12 份', () => {
+  let data = { recordId: 'r0', kept: [] };
+  for (let n = 1; n <= KEPT_LIMIT + 5; n++) data = keepBefore(data, { recordId: `r${n}` });
+  assert.equal(data.kept.length, KEPT_LIMIT);
+  assert.equal(data.kept[0].recordId, `r${KEPT_LIMIT + 4}`);
+});
+
+test('复制、存成工作流：不带节点自己的历史版本', () => {
+  const clip = clipOf([{ id: 'a', type: 'image', position: { x: 0, y: 0 }, data: { recordId: 'r2', kept: [{ recordId: 'r1', at: 1 }] } }], []);
+  assert.equal(clip.nodes[0].data.recordId, 'r2');
+  assert.equal('kept' in clip.nodes[0].data, false);
 });

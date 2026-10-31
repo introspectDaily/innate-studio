@@ -162,6 +162,80 @@ function dropSessions(userId, except) {
   saveSessions();
 }
 
+// ---------- Agent API Keys（Access Tokens）----------
+// 给非浏览器客户端（Codex / Claude Code / curl，走 SKILL.md 调接口）用的长效令牌。一个 key 绑定一个用户，
+// 解析出来就是那个用户的身份：空间隔离、积分、角色全都复用现有逻辑。本机模式下 userId 为 null，等价于“本地 Agent”。
+// 明文令牌只在创建时返回这一次，磁盘上只存散列。
+
+const KEYS_FILE = path.join(DATA_DIR, 'agent-keys.json');
+const KEY_PREFIX = 'isk_';
+let keys = read(KEYS_FILE, []);
+let keysMtime = 0;
+function syncKeys() {
+  try {
+    const mtime = fs.statSync(KEYS_FILE).mtimeMs;
+    if (mtime !== keysMtime) { keys = read(KEYS_FILE, []); keysMtime = mtime; }
+  } catch { keys = []; keysMtime = 0; }
+}
+function saveKeys() {
+  write(KEYS_FILE, keys);
+  try { keysMtime = fs.statSync(KEYS_FILE).mtimeMs; } catch {}
+}
+syncKeys();
+
+const keyHash = (token) => sha256(token);
+
+// 从 Authorization: Bearer <token> 里取令牌，没有就返回空串。
+export function bearerToken(req) {
+  const header = String(req.headers.authorization || '');
+  const match = /^Bearer\s+(\S+)$/i.exec(header);
+  return match ? match[1] : '';
+}
+
+// 这个请求带了合法的 key 吗（不更新使用时间，由 userOf 统一记）。server.js 用它来跳过同源校验——带 key 就不需要 CSRF 防护。
+export function apiKeyOf(req) {
+  syncKeys();
+  const token = bearerToken(req);
+  if (!token) return null;
+  return keys.find((k) => k.hash === keyHash(token) && !k.revokedAt) || null;
+}
+
+export function createApiKey({ userId, name, scope = 'write' }) {
+  syncKeys();
+  const token = `${KEY_PREFIX}${crypto.randomBytes(24).toString('hex')}`;
+  const key = {
+    id: `k_${crypto.randomBytes(8).toString('hex')}`,
+    userId: userId ?? null,
+    name: String(name || '').trim().slice(0, 40) || 'agent-key',
+    scope: scope === 'read' ? 'read' : 'write',
+    prefix: token.slice(0, 7),
+    hash: keyHash(token),
+    createdAt: Date.now(),
+    lastUsedAt: null,
+    revokedAt: null,
+  };
+  keys.push(key);
+  saveKeys();
+  const { hash, ...safe } = key;
+  return { ...safe, token }; // token 只在创建时返回这一次，hash 不随返回值泄露
+}
+
+// 列出/吊销某个用户的 key。本机模式 userId 传 null。
+export function listApiKeys(userId) {
+  syncKeys();
+  return keys
+    .filter((k) => k.userId === (userId ?? null) && !k.revokedAt)
+    .map(({ hash, token, ...rest }) => rest);
+}
+export function revokeApiKey(userId, keyId) {
+  syncKeys();
+  const key = keys.find((k) => k.id === keyId && k.userId === (userId ?? null) && !k.revokedAt);
+  if (!key) throw new HttpError(404, 'not_found', '令牌不存在');
+  key.revokedAt = Date.now();
+  saveKeys();
+  return key;
+}
+
 // ---------- 登录 ----------
 
 const fails = new Map();
@@ -205,11 +279,28 @@ function tokenOf(req) {
 }
 
 // 这个请求是谁发的。没登录、登录过期、账号停用了，都是 null。
+// 优先认 Authorization: Bearer 里的 Agent Key：它绑定到某个用户（本机模式为 null），解析出来就是那个身份。
 export function userOf(req) {
   syncUsers();
-  syncSessions();
-  const token = tokenOf(req);
+  const token = bearerToken(req) || tokenOf(req);
   if (!token) return null;
+  // Agent Key：散列对上就认，按它绑定的用户返回身份（本机模式 userId 为 null）。
+  syncKeys();
+  const key = keys.find((k) => k.hash === keyHash(token) && !k.revokedAt);
+  if (key) {
+    key.lastUsedAt = Date.now();
+    saveKeys();
+    if (!key.userId) return null;
+    const user = users.find((u) => u.id === key.userId);
+    if (!user || user.disabled) return null;
+    if (Date.now() - (user.lastSeenAt || 0) > 60 * 60 * 1000) {
+      user.lastSeenAt = Date.now();
+      saveUsers();
+    }
+    return user;
+  }
+  // 浏览器走 Cookie session。
+  syncSessions();
   const hashed = sha256(token);
   const session = sessions.find((s) => s.token === hashed && s.expiresAt > Date.now());
   const user = session && users.find((u) => u.id === session.userId);

@@ -10,7 +10,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from './config.js';
-import { allUsers, createUser, newPassword, updateUser, userDir } from './auth.js';
+import { allUsers, createApiKey, createUser, listApiKeys, newPassword, revokeApiKey, updateUser, userDir } from './auth.js';
 import { balanceOf, grantCredits } from './credits.js';
 
 const rawArgs = process.argv.slice(2);
@@ -63,8 +63,44 @@ try {
   } else if (command === 'list') {
     for (const user of allUsers()) console.log(`${user.role === 'admin' ? '管理员' : '成员  '}  ${user.name}${user.disabled ? '（已停用）' : ''}  积分: ${balanceOf(user.id)}`);
     if (!allUsers().length) console.log('还没有账号，服务处于本机模式。');
+  } else if (command === 'token' && name === 'add') {
+    // 本机模式（没有账号）创建绑定到“本地 Agent”的 key；多人模式必须指定 --user <名称>。
+    let userId = null;
+    if (allUsers().length) {
+      const who = flags.find((f) => f.startsWith('--user='))?.slice('--user='.length) || (flags.includes('--user') ? flags[flags.indexOf('--user') + 1] : null);
+      const target = allUsers().find((u) => u.name.toLowerCase() === String(who || '').toLowerCase());
+      if (!target) throw new Error('多人模式下请用 --user <名称> 指定令牌绑定的账号');
+      userId = target.id;
+    }
+    const scope = flags.includes('--scope=read') ? 'read' : 'write';
+    const display = flags.find((f) => f.startsWith('--name='))?.slice('--name='.length) || 'agent-key';
+    const key = createApiKey({ userId, name: display, scope });
+    console.log(`已创建令牌（${scope}）：${key.name}`);
+    console.log(`令牌：${key.token}`);
+    console.log('令牌只显示这一次，请妥善保存。');
+  } else if (command === 'token' && name === 'list') {
+    let userId = null;
+    if (allUsers().length) {
+      const who = flags.find((f) => f.startsWith('--user='))?.slice('--user='.length) || (flags.includes('--user') ? flags[flags.indexOf('--user') + 1] : null);
+      const target = allUsers().find((u) => u.name.toLowerCase() === String(who || '').toLowerCase());
+      if (!target) throw new Error('多人模式下请用 --user <名称> 指定账号');
+      userId = target.id;
+    }
+    const items = listApiKeys(userId);
+    if (!items.length) console.log('还没有令牌。');
+    for (const k of items) console.log(`${k.scope === 'read' ? '只读 ' : '读写 '}  ${k.prefix}…  ${k.name}  创建于 ${new Date(k.createdAt).toISOString().slice(0, 10)}`);
+  } else if (command === 'token' && name === 'revoke' && flags[0]) {
+    let userId = null;
+    if (allUsers().length) {
+      const who = flags.find((f) => f.startsWith('--user='))?.slice('--user='.length) || (flags.includes('--user') ? flags[flags.indexOf('--user') + 1] : null);
+      const target = allUsers().find((u) => u.name.toLowerCase() === String(who || '').toLowerCase());
+      if (!target) throw new Error('多人模式下请用 --user <名称> 指定账号');
+      userId = target.id;
+    }
+    revokeApiKey(userId, flags[0]);
+    console.log(`已吊销令牌 ${flags[0]}`);
   } else {
-    console.log('用法：\n  pnpm user add <名称> [--admin] [--with-local-data] [--password <密码>]\n  pnpm user reset <名称> [--password <密码>]\n  pnpm user grant <名称> <积分数>\n  pnpm user list');
+    console.log('用法：\n  pnpm user add <名称> [--admin] [--with-local-data] [--password <密码>]\n  pnpm user reset <名称> [--password <密码>]\n  pnpm user grant <名称> <积分数>\n  pnpm user list\n  pnpm user token add [--user <名称>] [--name <名>] [--scope read|write]\n  pnpm user token list [--user <名称>]\n  pnpm user token revoke <id> [--user <名称>]');
     process.exit(1);
   }
 } catch (err) {

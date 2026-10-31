@@ -94,7 +94,7 @@ export const state = {
   aihubmixBalance: null as { remaining: number | null; error?: string } | null,
 };
 
-export type StoreEvent = 'boot' | 'view' | 'app' | 'models' | 'history' | 'createType' | 'recordsType' | 'recordsSource' | 'composer' | 'immersive' | 'characters' | 'skills' | 'balance' | 'flows';
+export type StoreEvent = 'boot' | 'view' | 'app' | 'models' | 'history' | 'createType' | 'recordsType' | 'recordsSource' | 'composer' | 'immersive' | 'characters' | 'skills' | 'balance' | 'flows' | 'prefs';
 
 const listeners: Partial<Record<StoreEvent, Set<() => void>>> = {};
 const versions: Partial<Record<StoreEvent, number>> = {};
@@ -246,6 +246,27 @@ export function setPolishModel(model: string) {
   } catch {
     /* 存不了就只在本次打开期间生效 */
   }
+}
+
+// 画布上再次生成时，结果放在哪：'new' 另开一个新节点（默认），'here' 就地替换这个节点里的内容。
+// 节点上单独选过的按节点，没选过的跟随这里。
+const PLACE_KEY = 'innate-studio.canvas-place';
+
+export function canvasPlace(): 'new' | 'here' {
+  try {
+    return localStorage.getItem(PLACE_KEY) === 'here' ? 'here' : 'new';
+  } catch {
+    return 'new';
+  }
+}
+
+export function setCanvasPlace(place: 'new' | 'here') {
+  try {
+    localStorage.setItem(PLACE_KEY, place);
+  } catch {
+    /* 存不了就只在本次打开期间生效 */
+  }
+  emit('prefs');
 }
 
 let historySignature = '';

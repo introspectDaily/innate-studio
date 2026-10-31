@@ -17,7 +17,7 @@ import { HttpError, notFound, routes, sendJson, serveFile } from './server/http.
 import { apiKey } from './server/keys.js';
 import { MEDIA_PATH } from './server/media.js';
 import { startPolling } from './server/tasks.js';
-import { allUsers, isHosted, userOf } from './server/auth.js';
+import { allUsers, apiKeyOf, isHosted, userOf } from './server/auth.js';
 import { spaceOf } from './server/spaces.js';
 import './server/routes/account.js';
 import './server/routes/generate.js';
@@ -50,10 +50,16 @@ async function handle(req, res) {
   const isApi = pathname.startsWith('/api/');
   const isMedia = pathname.startsWith('/media/');
 
-  if ((isApi || isMedia) && !isTrustedRequest(req)) {
+  // 带 Agent Key 的请求不做同源校验：Bearer 令牌本身就是鉴权，CSRF 防护对它没有意义。
+  const key = isApi || isMedia ? apiKeyOf(req) : null;
+  if ((isApi || isMedia) && !isTrustedRequest(req) && !key) {
     return sendJson(res, 403, { error: { code: 'forbidden', message: '只接受本机页面发来的请求' } });
   }
-  const user = isHosted() && (isApi || isMedia) ? userOf(req) : null;
+  // 只读令牌（scope=read）只放行 GET；要生成/上传就得用 scope=write 的 key。
+  if (key && key.scope === 'read' && req.method !== 'GET') {
+    return sendJson(res, 403, { error: { code: 'read_only_key', message: '该令牌为只读，不能执行写操作' } });
+  }
+  const user = (isApi || isMedia) ? userOf(req) : null;
 
   if (isApi) {
     for (const { method, pattern, handler, access } of routes) {
@@ -106,6 +112,25 @@ const server = http.createServer((req, res) => {
   });
 });
 
+// 把实际监听的地址写进数据目录，好让 innate 这个命令行工具自己找到服务（端口改了也不用另外配置）。
+const SERVER_INFO_FILE = path.join(DATA_DIR, 'server.json');
+function writeServerInfo() {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(SERVER_INFO_FILE, `${JSON.stringify({ pid: process.pid, host: HOST, port: PORT, url: `http://${HOST}:${PORT}`, startedAt: new Date().toISOString() }, null, 2)}\n`);
+  } catch { /* 写不了就算了，只是少一个自动发现 */ }
+}
+function clearServerInfo() {
+  try {
+    const cur = JSON.parse(fs.readFileSync(SERVER_INFO_FILE, 'utf8'));
+    if (cur.pid === process.pid) fs.unlinkSync(SERVER_INFO_FILE);
+  } catch { /* 没有或不是自己写的就不管 */ }
+}
+// 正常退出、Ctrl+C、被 kill 都清掉，避免留下指向死进程的地址。
+for (const sig of ['exit', 'SIGINT', 'SIGTERM']) {
+  process.on(sig, () => { clearServerInfo(); if (sig !== 'exit') process.exit(0); });
+}
+
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     console.error(`端口 ${PORT} 已被占用。可以换一个端口启动：PORT=5180 node server.js`);
@@ -116,6 +141,7 @@ server.on('error', (err) => {
 });
 
 server.listen(PORT, HOST, () => {
+  writeServerInfo();
   console.log(`Innate Studio 已启动：http://${HOST}:${PORT}`);
   console.log(`数据目录：${DATA_DIR}`);
   if (isHosted()) console.log(`多人模式：${allUsers().length} 个账号，需要登录。`);
