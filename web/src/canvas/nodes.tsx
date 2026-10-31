@@ -1030,7 +1030,7 @@ function pickRole(anchor: HTMLElement, model: string | undefined, current: Frame
 // 面板最上面一排：连进来的节点各一个小方块，写着它当什么用；最后一个加号是再加一份参考素材。
 // 连进来的文本节点也在这里（它的内容会拼进提示词）。视频节点收图片、视频、音频，图片可以点开改用途；
 // 图片节点只收图片（图生图），limit 是它的模型最多收几张；文本、音频节点只收文本。这一排每种节点都有，最后一个加号一直在。
-function Refs({ id, kind, model = '', limit = 0 }: { id: string; kind: NodeKind; model?: string; limit?: number }) {
+function Refs({ id, kind, model = '', limit = 0, mode }: { id: string; kind: NodeKind; model?: string; limit?: number; mode?: string }) {
   const forImage = kind === 'image';
   const flow = useReactFlow();
   const { snap, addInput, continueVideo, jumpTo, hoverNode } = useContext(CanvasActions);
@@ -1052,6 +1052,20 @@ function Refs({ id, kind, model = '', limit = 0 }: { id: string; kind: NodeKind;
   const used = inputs.filter((i) => i.link.kind === 'image').length + (usesSelfRef ? 1 : 0);
   const canUpload = kind === 'video' || (forImage && used < limit);
   const only = !canUpload;
+  // 视频节点按生成方式把缺的素材摆成空格（和创作页的固定槽一个意思）：首尾帧缺首帧/尾帧，编辑/延长缺原片视频。
+  const wantSlots: { key: string; media: Kind; role?: FrameRole; label: string }[] = [];
+  if (kind === 'video' && mode) {
+    const able = specOf(model);
+    const images = inputs.filter((i) => i.link.kind === 'image');
+    if (mode === 'frames' && able.frames.includes('first_frame')) {
+      if (!images.some((i) => i.link.role === 'first')) wantSlots.push({ key: 'first', media: 'image', role: 'first', label: '首帧' });
+      if (hasLastFrame(model) && !images.some((i) => i.link.role === 'last')) wantSlots.push({ key: 'last', media: 'image', role: 'last', label: '尾帧' });
+    }
+    if ((mode === 'edit' || mode === 'extend') && !inputs.some((i) => i.link.kind === 'video')) wantSlots.push({ key: 'source', media: 'video', label: '原片视频' });
+  }
+  // 点空格直接进选素材弹窗，选完按槽位落用途。
+  const pickSlot = (button: HTMLElement, slot: (typeof wantSlots)[number]) =>
+    openAssetPicker({ title: `添加${slot.label}`, kind: slot.media, onPick: (ref) => addInput(id, ref.kind, { upload: { url: ref.url, name: ref.name } }, slot.role) });
   // 移除一份素材就是断开那条线，上游的节点留在画布上。
   const unlink = (edgeId: string) => {
     snap();
@@ -1105,7 +1119,16 @@ function Refs({ id, kind, model = '', limit = 0 }: { id: string; kind: NodeKind;
         return flow.updateNodeData(id, { selfRole: 'reference', selfFrame: undefined });
       }
       if (value === 'text') return addInput(id, 'text');
-      const onPick = (ref: Ref) => addInput(id, ref.kind, { upload: { url: ref.url, name: ref.name } });
+      const onPick = (ref: Ref) => {
+        // 首尾帧方式下传图进来自动落槽：没标首帧的当首帧，其次尾帧；槽都满了就当普通参考图。
+        let role: FrameRole | undefined;
+        if (mode === 'frames' && ref.kind === 'image' && specOf(model).frames.includes('first_frame')) {
+          const images = inputs.filter((i) => i.link.kind === 'image');
+          if (!images.some((i) => i.link.role === 'first')) role = 'first';
+          else if (hasLastFrame(model) && !images.some((i) => i.link.role === 'last')) role = 'last';
+        }
+        addInput(id, ref.kind, { upload: { url: ref.url, name: ref.name } }, role);
+      };
       if (forImage) return openAssetPicker({ title: '添加参考图', kind: 'image', remaining: limit - used, onPick });
       // 视频节点的素材上限按模型来（2.5 是 30 图 + 10 视频 + 10 音频，其余 9/3/3）；工作流看它自己的规则，这里不设限。
       const videoLimits = isFlowModel(model) ? undefined : refLimitsOf(specOf(model));
@@ -1213,6 +1236,20 @@ export function VideoNode({ id, data: raw, selected, dragging }: NodeProps) {
   const able = specOf(data.model);
   const ratioLabel = (value: string) => RATIOS.find((r) => r.value === value)?.label || value;
   const set = (patch: Partial<VideoData>) => flow.updateNodeData(id, patch);
+  // 切生成方式时把连线用途一并对齐，输入区的小方块标签跟着变（和创作页选首尾帧出现两个槽是一个意思）：
+  // 切到首尾帧，图片连线按顺序标成首帧、尾帧；切回全能参考，把标记还原成参考图。编辑/延长只看视频连线，不用动。
+  const setMode = (mode: VideoData['mode']) => {
+    const images = inputs.filter((i) => i.link.kind === 'image');
+    if (mode === 'frames') {
+      for (const [index, { edgeId, link }] of images.entries()) {
+        const role: FrameRole = index === 0 && able.frames.includes('first_frame') ? 'first' : index === 1 && hasLastFrame(data.model) ? 'last' : 'reference';
+        if ((link.role || 'reference') !== role) flow.updateEdgeData(edgeId, { role });
+      }
+    } else if (mode === 'reference') {
+      for (const { edgeId, link } of images) if (link.role && link.role !== 'reference') flow.updateEdgeData(edgeId, { role: 'reference' });
+    }
+    set(fitVideo({ ...data, mode }));
+  };
   // 模型是工作流时，它自己的枚举、开关参数（模式、风格预设…）也放进「参数」：键就是规则里的参数名。分辨率、时长用节点上直接的那两个。
   const flowGroups = flowParamGroups(data.model, data.flowValues, (next) => set({ flowValues: next }), ['resolution']);
   const { snap } = useContext(CanvasActions);
@@ -1237,7 +1274,7 @@ export function VideoNode({ id, data: raw, selected, dragging }: NodeProps) {
       tools={<NodeTools id={id} kind="video" data={data} />}
       panel={
         <>
-          <Refs id={id} kind="video" model={data.model} />
+          <Refs id={id} kind="video" model={data.model} mode={data.mode || 'reference'} />
           <Prompt id={id} value={data.prompt} placeholder={promptHint(linked, data.selfFrame ? '描述接续动作与剧情，例如：主角转身上车，车辆向远方驶去' : '描述主体、动作、场景、运镜、光线与风格')} />
           {data.error && !data.busy && <p className="cnode-error">{data.error}</p>}
           <Bar working={working} ready={Boolean(data.prompt.trim()) || inputs.length > 0 || hasSelfRef} action="生成视频" onSend={() => generate(flow, id, snap)}>
@@ -1258,7 +1295,7 @@ export function VideoNode({ id, data: raw, selected, dragging }: NodeProps) {
                     ]
                   : []),
               ]}
-              onChange={(mode) => set(fitVideo({ ...data, mode: mode as VideoData['mode'] }))}
+              onChange={(mode) => setMode(mode as VideoData['mode'])}
             />
             <Dropdown variant="tool" chevron label="模型" value={data.model} options={models.map((m) => modelOption(m, modelName(m), modelHint(m)))} onChange={(model) => set(fitVideo({ ...data, model }))} />
             <Params

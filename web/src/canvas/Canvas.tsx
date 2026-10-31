@@ -46,6 +46,11 @@ const PANEL_ROOM = 240;
 const PANEL_WIDTH = 680;
 // 拖动节点时，离别的节点的边线、中线多近就吸过去（屏幕上的像素）。
 const SNAP_REACH = 6;
+// 画布能缩放到多大、多小：10% 到 200%。
+const MIN_ZOOM = 0.1;
+const MAX_ZOOM = 2;
+// 触控板捏合一格只有几个像素，鼠标滚轮一格是一百，差十倍，缩放要按各自的量级换算（和 React Flow 里一样）。
+const MAC = /Macintosh|Mac OS X|iPhone|iPad/.test(navigator.userAgent);
 
 // 一个节点的框在画布上占的位置，不算上面那行名字：对齐看的是框。
 const membersOf = (node: Node) => (node.data as unknown as GroupData).members || [];
@@ -235,6 +240,38 @@ function Board({ id, onExit }: { id: string; onExit: () => void }) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [undo, redo]);
+
+  // ---------- 缩放 ----------
+
+  // 视频、音频的画面和输入面板带着 nowheel（在上面滚动不要挪画布），React Flow 见到这个类名就把整条滚轮手势丢掉：
+  // 它只替我们把页面的缩放挡掉了，画布自己也不动。结果鼠标停在视频节点上捏合、或者按着 ⌘ 滚轮，都没反应。
+  // 这里把漏掉的这一段补上，围着鼠标缩放，力度和空白处一样。
+  useEffect(() => {
+    const pane = wrap.current;
+    if (!pane) return;
+    const onWheel = (e: WheelEvent) => {
+      // 缩放的两种按法：触控板捏合，浏览器给的是 ctrl + wheel；按着 ⌘（Windows 上是 Ctrl）再滚。
+      // ⌘ 在事件里是 metaKey，不是 ctrlKey，两种都要认，否则按着 ⌘ 滚轮还是没反应。
+      if (!(e.ctrlKey || e.metaKey) || !(e.target as Element).closest('.nowheel')) return;
+      // 这一下就留在这里：页面的缩放、React Flow 的滚轮都不用再处理一遍。
+      e.preventDefault();
+      e.stopPropagation();
+      const box = pane.getBoundingClientRect();
+      const { x, y, zoom } = flow.getViewport();
+      // 鼠标底下那一点在画布上的坐标。缩完之后它仍停在鼠标下面，看起来就是围着鼠标放大。
+      const wx = (e.clientX - box.left - x) / zoom;
+      const wy = (e.clientY - box.top - y) / zoom;
+      // 一格乘一个固定的倍数：连着捏是累乘的，不会一格就跳到底。
+      // 触控板捏合的一格只有几个像素，按十倍的力道换算；⌘ + 滚轮一格是一百，不乘（React Flow 里也是这么分的）。
+      const step = -e.deltaY * (e.deltaMode === 1 ? 0.05 : e.deltaMode ? 1 : 0.002) * (e.ctrlKey && MAC ? 10 : 1);
+      const next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom * 2 ** step));
+      if (next === zoom) return;
+      flow.setViewport({ x: e.clientX - box.left - wx * next, y: e.clientY - box.top - wy * next, zoom: next });
+    };
+    // 在捕获阶段接住：React Flow 的滚轮挂在里面那层 pane 上，冒泡了就轮不到这里。
+    pane.addEventListener('wheel', onWheel, { passive: false, capture: true });
+    return () => pane.removeEventListener('wheel', onWheel, { capture: true });
+  }, [flow]);
 
   // ---------- 加节点、连线 ----------
 
@@ -1464,8 +1501,8 @@ function Board({ id, onExit }: { id: string; onExit: () => void }) {
             e.preventDefault();
             nodeMenu(e.clientX, e.clientY);
           }}
-          minZoom={0.1}
-          maxZoom={2}
+          minZoom={MIN_ZOOM}
+          maxZoom={MAX_ZOOM}
           deleteKeyCode={['Backspace', 'Delete']}
           zoomOnDoubleClick={false}
           connectOnClick={false}
