@@ -2,25 +2,27 @@
 // 状态和动作在 state.ts。
 
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { state, useStore, KINDS, goTo, loadCharacters, canManage, usesCredits, modelOption } from '../store.ts';
+import { state, useStore, KINDS, goTo, loadCharacters, canManage, usesCredits, modelOption, loadFlows } from '../store.ts';
 import { IMAGE_QUALITY_LABELS, modelLabel, modelNote, REFERENCE_MODE_LABEL, SPEECH_MODEL, AUDIO_MODEL } from '../../../shared/models.ts';
+import { ruleKind, ruleLabel, type InputRule } from '../../../shared/autodl.ts';
 import { musicSeconds } from '../request.ts';
 import { Icon, type IconName } from '../ui/Icon.tsx';
 import { Segmented, Slider, Toggle, Dropdown, FormRow, tip, clipTip } from '../ui/controls.tsx';
-import { openPopover, openMenu, toast } from '../ui/layers.tsx';
+import { openPopover, openMenu, openModal, toast } from '../ui/layers.tsx';
 import { enter, enterEach, reducedMotion, useOnChange, EASE_OUT } from '../ui/motion.ts';
 import { Thumb, openAssetPicker } from '../assets.tsx';
 import { MediaTile, AddTile } from '../ui/tiles.tsx';
 import { openAdmin } from '../settings.tsx';
 import { fmtCredits } from '../format.ts';
 import { SkillPanel } from '../skills.tsx';
-import type { Kind, Ref, VideoForm } from '../types.ts';
+import type { FlowSummary, Kind, Ref, VideoForm } from '../types.ts';
 import {
   composer, RATIOS,
   TYPES, typeOf, draftPrompt, specOf, hasLastFrame, imageRatios, imageSizes, imageQualities, imageRefLimit, currentCredits, submitProblem,
   update, setMode, swapFrames, updateStudio, setType, typePrompt, polish, undoPolish, submit, registerPrompt,
   voiceName, voiceNote, togglePreview, setVoiceFilter, pickVoice, stopPreview, useCharacter, activeSkill, setSkill,
   addableKinds, mediaRoom, usedMediaUrls, addMedia, addFiles, dismissSubmitError,
+  flowDefinition, flowSlots, flowPrimaryKey, pickFlow, setFlowValue, setFlowRef, loadFlowDefinition,
 } from './state.ts';
 
 type Mode = { value: VideoForm['mode']; label: string; icon: IconName; note: string };
@@ -122,6 +124,7 @@ function Slot({ item, name, tag, addLabel, onAdd, onRemove }: { item: Ref | null
 function MediaBlock() {
   const { form, studio } = composer;
   const type = studio.type;
+  if (type === 'flow') return <FlowMedia />;
   const imageRefs = type === 'image' ? imageRefLimit() : 0;
   const hidden = !(type === 'music' || (type === 'video' && form.mode !== 'text') || imageRefs > 0);
   // 加进来的素材都交给 addMedia：放哪、同一份加没加过、满没满，和拖入、粘贴是同一套规则。
@@ -402,6 +405,7 @@ function MusicToolbar() {
 
 function Toolbar() {
   const { studio } = composer;
+  if (studio.type === 'flow') return <FlowToolbar />;
   if (studio.type === 'image') return <ImageToolbar />;
   if (studio.type === 'sfx') return <SfxToolbar />;
   if (studio.type === 'music') return <MusicToolbar />;
@@ -601,13 +605,237 @@ async function pickCharacter(button: HTMLElement, type: 'image' | 'video') {
   });
 }
 
+// ---------- 工作流（AutoDL.art）----------
+// 工作流沿用输入框里熟悉的样子：主文本（多数是提示词）写在中间的大文本框里，素材放左边的格子，
+// 其余参数（时长、分辨率、模式、开关、数字）收进下面工具栏的「参数」面板，和视频的参数放法一致。
+// 换工作流时主文本和素材留着（不同工作流大多是一套参数），只有规矩不同的那些按新规则重新对一遍。
+
+const FLOW_KINDS: Record<string, Kind> = { image: 'image', video: 'video', audio: 'audio' };
+
+// 挑选工作流：弹窗里列出目录（按最近一周的用量排），每个带封面、说明、必填的素材和起价。load=true 时先刷新一遍目录。
+function pickWorkflow(load = false) {
+  if (load) loadFlows(true);
+  const list = state.flows.items;
+  const body = (
+    <div className="flow-picker">
+      {list.length ? (
+        <div className="pick-grid is-flows">
+          {list.map((item: FlowSummary) => {
+            const needs = (item.media || []).map((kind) => KINDS[kind].label).join('、');
+            return (
+              <button
+                key={item.uuid}
+                className={`pick-card ${composer.studio.flow.workflow?.uuid === item.uuid ? 'is-current' : ''}`}
+                type="button"
+                onClick={() => {
+                  modal.close();
+                  pickFlow(item.uuid);
+                }}
+              >
+                <div className="pick-thumb">{item.cover ? <img className="thumb-img" src={item.cover} alt="" loading="lazy" referrerPolicy="no-referrer" /> : <div className="thumb-fallback">{needs || '工作流'}</div>}</div>
+                <div className="pick-name ellipsis">{item.name}</div>
+                {item.description && <div className="pick-desc">{item.description}</div>}
+                <div className="pick-badges">
+                  <span className="badge badge-pending">{item.fromCredits != null ? `起 ${item.fromCredits} 积分` : '按量计费'}</span>
+                  {needs && <span className="badge badge-ok">{needs}</span>}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="empty small-empty">{state.flows.error || (state.flows.loaded ? '平台上还没有可用的工作流' : '读取工作流目录…')}</div>
+      )}
+    </div>
+  );
+  const modal = openModal({ title: state.flows.total ? `选择工作流（${state.flows.total} 个）` : '选择工作流', size: 'lg', content: body });
+}
+
+// 左边的素材：规则里每一条 image / video / audio 是一个格子。加一份、去掉一份都按字段名记。
+function FlowMedia() {
+  const { flow } = composer.studio;
+  const media = (['image', 'audio', 'video'] as Kind[]).flatMap((kind) => flowSlots(kind));
+  if (!media.length) return null;
+  return (
+    <div className="frames-row flow-media">
+      {media.map(({ key, rule }) => {
+        const kind = FLOW_KINDS[rule.type] || 'image';
+        const ref = flow.refs[key] || null;
+        const name = ruleLabel(rule, key);
+        return (
+          <Slot
+            key={key}
+            item={ref}
+            name={name}
+            tag={ref?.duration ? `${Math.round(ref.duration)} 秒` : KINDS[kind].label}
+            addLabel={`添加${name}${rule.required ? '' : '（可选）'}`}
+            onAdd={() => openAssetPicker({ title: `添加${name}`, kind, remaining: 1, usedUrls: usedMediaUrls(), onPick: (picked) => setFlowRef(key, picked) })}
+            onRemove={() => setFlowRef(key, null)}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+// 参数面板里的一行：左边名称和范围，右边控件。开关、下拉、数字、短文字各是一种。
+function FlowRow({ fieldKey, name, rule, value }: { fieldKey: string; name: string; rule: InputRule; value: unknown }) {
+  const kind = ruleKind(rule);
+  const range = rule.type === 'integer' || rule.type === 'number' ? (rule.min !== undefined && rule.max !== undefined ? `${rule.min}–${rule.max}` : null) : rule.max_length && rule.max_length <= 64 ? `最多 ${rule.max_length} 字` : null;
+  const desc = [rule.description, range].filter(Boolean).join(' · ') || undefined;
+  if (kind === 'toggle') return <FormRow label={name} desc={desc}><Toggle checked={value === true} label={name} onChange={(checked) => setFlowValue(fieldKey, checked)} /></FormRow>;
+  if (kind === 'select') {
+    return (
+      <FormRow label={name} desc={desc}>
+        <Dropdown label={name} value={String(value ?? '')} options={(rule.options || []).map((option) => ({ value: option.label, label: option.label }))} onChange={(next) => setFlowValue(fieldKey, next)} chevron />
+      </FormRow>
+    );
+  }
+  if (kind === 'number') {
+    return (
+      <FormRow label={name} desc={desc}>
+        <NumberInput value={String(value ?? '')} onInput={(text) => setFlowValue(fieldKey, text)} min={rule.min} max={rule.max} step={rule.step || (rule.type === 'integer' ? 1 : 0.01)} aria-label={name} />
+      </FormRow>
+    );
+  }
+  return (
+    <FormRow label={name} desc={desc}>
+      <input className="input" type="text" defaultValue={value == null ? '' : String(value)} maxLength={rule.max_length} aria-label={name} onInput={(e) => setFlowValue(fieldKey, e.currentTarget.value)} />
+    </FormRow>
+  );
+}
+
+// 页面刚打开、目录刚到：把上次选的工作流的规则取回来。
+function useFlowDefinition() {
+  const uuid = composer.studio.flow.workflow?.uuid || '';
+  useEffect(() => {
+    if (uuid && !flowDefinition()) loadFlowDefinition();
+  }, [uuid]);
+  useEffect(() => {
+    loadFlows();
+  }, []);
+}
+
+// 工具栏上的工作流菜单和三样常用参数：时长、分辨率、参数面板。参数按平台给的规则画，没选工作流时只有挑选入口。
+function FlowToolbar() {
+  useStore('flows');
+  useFlowDefinition();
+  const { flow } = composer.studio;
+  const definition = flowDefinition();
+  if (!flow.workflow) {
+    const ready = state.flows.loaded || state.flows.hasKey === false;
+    return (
+      <>
+        <button className="dropdown dropdown-tool" type="button" disabled={!state.app.autodl?.hasKey || !ready} onClick={() => pickWorkflow()}>
+          <Icon name="workflow" />
+          <span>{state.app.autodl?.hasKey ? (state.flows.loaded ? `工作流 · 共 ${state.flows.total} 个` : '读取工作流…') : '未配置 AutoDL.art 令牌'}</span>
+        </button>
+        {!state.app.autodl?.hasKey && canManage() && (
+          <button className="entry-action-btn" type="button" onClick={openAdmin}>
+            去配置
+          </button>
+        )}
+      </>
+    );
+  }
+  const items = state.flows.items;
+  const known = items.some((item) => item.uuid === flow.workflow?.uuid);
+  const options = [...(flow.workflow && !known ? [{ value: flow.workflow.uuid, label: flow.workflow.name }] : []), ...items.map((item) => ({ value: item.uuid, label: item.name, note: item.fromCredits != null ? `起 ${item.fromCredits} 积分` : undefined }))];
+  const rules = definition?.input_rules || {};
+  // 工具栏上只放时长和分辨率这种常改的；其余（模式、开关、种子、数字）在「参数」面板里。
+  const durationKey = Object.keys(rules).find((key) => (key === 'duration' || key === 'audio_duration') && (rules[key].type === 'integer' || rules[key].type === 'number'));
+  const resolutionKey = Object.keys(rules).find((key) => key === 'resolution' && rules[key].type === 'enum');
+  const more = Object.entries(rules).filter(([key, rule]) => ruleKind(rule) !== 'media' && key !== durationKey && key !== resolutionKey && flowPrimaryKey() !== key);
+  return (
+    <>
+      <Dropdown variant="tool" control="workflow" icon="workflow" label="工作流" value={flow.workflow.uuid} options={options.length ? options : [{ value: flow.workflow.uuid, label: flow.workflow.name }]} onChange={(uuid) => uuid && pickFlow(uuid)} />
+      <button className="entry-action-btn" type="button" onClick={() => pickWorkflow(true)}>
+        更换
+      </button>
+      {durationKey && (
+        <PanelButton name="duration" label="时长" ariaLabel={`时长：${flow.values[durationKey] ?? ''}${rules[durationKey].max && rules[durationKey].max <= 15 ? ' 秒' : ''}`} className="duration-popover" panel={() => <FlowNumberPanel ruleKey={durationKey} />}>
+          <Icon name="clock" />
+          <span>{`${flow.values[durationKey] ?? ''}${rules[durationKey].max && rules[durationKey].max <= 15 ? ' 秒' : ''}`}</span>
+        </PanelButton>
+      )}
+      {resolutionKey && <FlowSelectButton ruleKey={resolutionKey} />}
+      {more.length > 0 && (
+        <PanelButton name="more" label="参数" className="more-popover" panel={() => <FlowMorePanel fields={more} />}>
+          <Icon name="sliders" />
+          <span>参数</span>
+        </PanelButton>
+      )}
+    </>
+  );
+}
+
+// 「时长」面板：滑杆加数字框，范围和步长按规则来。
+function FlowNumberPanel({ ruleKey }: { ruleKey: string }) {
+  useStore('composer');
+  const rule = flowDefinition()?.input_rules?.[ruleKey];
+  const value = Number(composer.studio.flow.values[ruleKey]);
+  if (!rule) return null;
+  const min = rule.min ?? 0;
+  const max = rule.max ?? min + 60;
+  const name = ruleLabel(rule, ruleKey);
+  const integer = rule.type === 'integer';
+  const marks = Array.from({ length: Math.min(Math.floor(max - min) + 1, 16) }, (_, i) => Math.round(min + ((max - min) * i) / 15));
+  return (
+    <>
+      <div className="popover-title">{name}</div>
+      <div className="duration-row">
+        <Slider label={name} min={min} max={max} marks={integer ? marks : []} value={value} onChange={(next) => setFlowValue(ruleKey, next)} />
+        <label className="input duration-field">
+          <input type="number" inputMode={integer ? 'numeric' : 'decimal'} min={min} max={max} step={rule.step || (integer ? 1 : 0.01)} value={String(composer.studio.flow.values[ruleKey] ?? '')} aria-label={name} onChange={(e) => setFlowValue(ruleKey, e.currentTarget.value)} />
+          {rule.max != null && rule.max <= 15 && <span>秒</span>}
+        </label>
+      </div>
+    </>
+  );
+}
+
+// 分辨率这类枚举：工具栏上一个下拉，直接选。
+function FlowSelectButton({ ruleKey }: { ruleKey: string }) {
+  useStore('composer');
+  const rule = flowDefinition()?.input_rules?.[ruleKey];
+  if (!rule) return null;
+  const name = ruleLabel(rule, ruleKey);
+  return (
+    <Dropdown
+      variant="tool"
+      control={ruleKey}
+      icon="frames"
+      label={name}
+      value={String(composer.studio.flow.values[ruleKey] ?? '')}
+      options={(rule.options || []).map((option) => ({ value: option.label, label: option.label }))}
+      onChange={(next) => setFlowValue(ruleKey, next)}
+    />
+  );
+}
+
+// 「参数」面板：其余的参数一行一项，说明写在名称下面。
+function FlowMorePanel({ fields }: { fields: [string, InputRule][] }) {
+  useStore('composer');
+  const { values } = composer.studio.flow;
+  if (!fields.length) return <div className="muted small">这个工作流不用改别的参数。</div>;
+  return (
+    <>
+      {fields.map(([key, rule]) => (
+        <FlowRow key={key} fieldKey={key} name={ruleLabel(rule, key)} rule={rule} value={values[key]} />
+      ))}
+    </>
+  );
+}
+
 function SendArea() {
-  if (!state.app.hasKey) {
+  // 工作流用的是 AutoDL.art 的令牌，其余内容用的是火山方舟的 Key。
+  const needsKey = composer.studio.type === 'flow' ? !state.app.autodl?.hasKey : !state.app.hasKey;
+  if (needsKey) {
     // 多人模式下 Key 由管理员配，成员只能等。
     if (!canManage()) return <span className="composer-hint">服务暂未开通</span>;
     return (
       <button className="btn btn-primary btn-sm" type="button" onClick={openAdmin}>
-        设置 API Key
+        {composer.studio.type === 'flow' ? '设置 AutoDL.art 令牌' : '设置 API Key'}
       </button>
     );
   }
@@ -689,7 +917,10 @@ export function Composer() {
   useStore('composer', 'app', 'balance');
   const { studio } = composer;
   const type = typeOf();
-  const text = draftPrompt();
+  // 工作流的主文本（提示词、朗读文本）也写在大文本框里；没有文字参数的工作流不显示它。
+  const flowPrimary = studio.type === 'flow' ? flowDefinition()?.input_rules?.[flowPrimaryKey() || ''] : undefined;
+  const flowKey = studio.type === 'flow' && flowPrimary ? flowPrimaryKey() : null;
+  const text = studio.type === 'flow' && !flowPrimary ? '' : draftPrompt();
   const skill = activeSkill();
   const prompt = useRef<HTMLTextAreaElement>(null);
   const title = useRef<HTMLHeadingElement>(null);
@@ -703,11 +934,13 @@ export function Composer() {
   const dragDepth = useRef(0);
   const hasFiles = (e: React.DragEvent) => e.dataTransfer.types.includes('Files');
   const settledHeight = useRef(0);
+  useStore('flows');
 
   // 文本框里的字由用户打，不由这里逐字回写；只有换类型、润色、复用这些从外面改了文字的时候才写回去。
-  // 高度跟着内容长，最高 280。
+  // 高度跟着内容长，最高 280。工作流没有提示词框，这时不量。
   useLayoutEffect(() => {
-    const el = prompt.current!;
+    const el = prompt.current;
+    if (!el) return;
     if (el.value !== text) el.value = text;
     // 选着技能时，第一行让出技能名的位置，字接在它后面。
     el.style.textIndent = chip.current ? `${chip.current.offsetWidth - 12}px` : '';
@@ -734,7 +967,9 @@ export function Composer() {
 
   // 类型、生成方式、模型家族变了，输入框里的东西就不一样高。高度滑过去，下面的记录跟着挪，不是跳一下。
   // 只管这几种变化：打字撑高文本框时不做动效。
-  const shape = `${studio.type}:${composer.form.mode}:${modesFor().length}:${hasLastFrame()}:${studio.type === 'image' && imageRefLimit() > 0}:${Boolean(skill)}`;
+  // 工作流的参数全部在表单里，这时不放提示词框；素材和参数都是按规则画的，高度变化跟着参数的多少走。
+  const flowFields = studio.type === 'flow' ? Object.keys(flowDefinition()?.input_rules || {}).length : 0;
+  const shape = `${studio.type}:${composer.form.mode}:${modesFor().length}:${hasLastFrame()}:${studio.type === 'image' && imageRefLimit() > 0}:${Boolean(skill)}:${flowFields}`;
   useLayoutEffect(() => {
     const el = card.current!;
     // 上一次还没滑完就又变了，从现在停着的高度接着滑。
@@ -749,14 +984,17 @@ export function Composer() {
     if (resizing.current?.playState !== 'running') settledHeight.current = card.current!.offsetHeight;
   });
 
-  // 读到模型列表后，没有可用模型的类型不能选。
+  // 读到模型列表后，没有可用模型的类型不能选。工作流看的是 AutoDL.art 的令牌和工作流目录。
   const { known, image } = state.catalog;
-  const missing: Record<string, boolean> = { image: known && !image.length };
+  const missing: Record<string, boolean> = {
+    image: Boolean(known && !image.length),
+    flow: !state.app.autodl?.hasKey || Boolean(state.flows.loaded && (state.flows.error || !state.flows.items.length)),
+  };
 
   return (
     <section className="composer">
       <h1 ref={title} className="composer-title">
-        {type.title}
+        {studio.type === 'flow' && studio.flow.workflow ? studio.flow.workflow.name : type.title}
       </h1>
       <div ref={types} className="composer-types">
         <Segmented
@@ -807,8 +1045,8 @@ export function Composer() {
           className="prompt"
           rows={3}
           defaultValue={text}
-          hidden={!type.placeholder}
-          placeholder={skill ? '输入简要描述，发送时自动扩写' : type.placeholder || ''}
+          hidden={!type.placeholder && !flowKey}
+          placeholder={skill ? '输入简要描述，发送时自动扩写' : flowKey && flowPrimary ? flowPrimary.description || `输入${ruleLabel(flowPrimary, flowKey)}` : type.placeholder || ''}
           aria-label={type.value === 'speech' ? '朗读文本' : '提示词'}
           onInput={(e) => typePrompt(e.currentTarget.value)}
           onPaste={(e) => {

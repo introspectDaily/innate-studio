@@ -12,24 +12,25 @@ import { Segmented, SearchBox, tip, clipTip } from './ui/controls.tsx';
 import { toast, openModal, openMenu, confirmDialog, copyText } from './ui/layers.tsx';
 import { enter } from './ui/motion.ts';
 import { FailureState, explainFailure, refundNote } from './ui/states.tsx';
-import { setForm, setStudio, submit, useImageForVideo, useVideoForMusic } from './composer/state.ts';
+import { setForm, setStudio, setFlow, submit, useImageForVideo, useVideoForMusic } from './composer/state.ts';
 import { openCharacterEditor } from './characters.tsx';
 import { IMAGE_QUALITY_LABELS, REFERENCE_MODE_LABEL, estimateCost } from '../../shared/models.ts';
+import { ruleLabel } from '../../shared/autodl.ts';
 import type { CreateType, HistoryItem, Ref } from './types.ts';
 
 const MODE_LABELS: Record<string, string> = { text: '文生视频', frames: '首尾帧' };
 const STATUS_LABELS: Record<string, string> = { queued: '排队中', in_progress: '生成中', completed: '已完成', failed: '失败' };
 const KIND_LABELS = { video: '视频', image: '图片', audio: '音频' };
-// 五种内容，和创作页输入框上方的切换是同一组。
-const TYPE_LABELS: Record<CreateType, string> = { video: '视频', image: '图片', speech: '语音', sfx: '音效', music: '配乐' };
+// 五种内容，和创作页输入框上方的切换是同一组。工作流是 AutoDL.art 上跑的 ComfyUI 工作流。
+const TYPE_LABELS: Record<CreateType, string> = { video: '视频', image: '图片', speech: '语音', sfx: '音效', music: '配乐', flow: '工作流' };
 
 const message = (err: unknown) => (err as Error).message;
 
-// 这条记录是哪种内容：视频、图片，或者音频里的语音、音效、配乐。
-const typeOf = (item: HistoryItem): CreateType => (item.kind === 'audio' ? item.tool! : item.kind);
+// 这条记录是哪种内容：工作流、视频、图片，或者音频里的语音、音效、配乐。
+const typeOf = (item: HistoryItem): CreateType => (item.provider === 'autodl' ? 'flow' : item.kind === 'audio' ? item.tool! : item.kind);
 const typeLabel = (item: HistoryItem) => TYPE_LABELS[typeOf(item)];
-// 没有提示词的记录（配乐）用它的类型来称呼。
-const nameOf = (item: HistoryItem) => item.prompt || typeLabel(item);
+// 没有提示词的记录（配乐、只填了素材和参数的工作流）用它的类型或工作流的名字来称呼。
+const nameOf = (item: HistoryItem) => item.prompt || (item.provider === 'autodl' ? item.model : '') || typeLabel(item);
 const done = (item: HistoryItem) => item.status === 'completed' && Boolean(item.mediaUrl);
 
 const RECENT_COUNT = 6;
@@ -46,6 +47,7 @@ function modeOf(item: HistoryItem) {
 
 function refsOf(item: HistoryItem): Ref[] {
   const f = item.form;
+  if (item.provider === 'autodl') return Object.values((f?.refs || {}) as Record<string, Ref | null>).filter((ref): ref is Ref => Boolean(ref));
   if (!f || item.kind !== 'video') return [];
   if (f.mode === 'frames') return [f.frames?.first, f.frames?.last].filter(Boolean);
   if (f.mode === 'reference') return [...(f.refs?.image || []), ...(f.refs?.video || []), ...(f.refs?.audio || [])];
@@ -75,7 +77,10 @@ function fill(item: HistoryItem) {
   // 画布的记号不跟着填回创作面板，不然下一次在创作页生成的也会被算成画布的。
   const { from: _from, ...rest } = item.form || {};
   const form = item.form && rest;
-  if (item.kind !== 'video') {
+  if (item.provider === 'autodl') {
+    // 工作流：选回同一条工作流，按记录里存的规则和参数把表单恢复出来。规则要现取，所以不等它。
+    setFlow(item);
+  } else if (item.kind !== 'video') {
     setStudio(typeOf(item) as 'image' | 'speech' | 'sfx' | 'music', form || { prompt: item.prompt });
   } else if (form) {
     setForm(form);
@@ -150,6 +155,22 @@ function download(item: HistoryItem) {
   link.remove();
 }
 
+// 一次出了好几份结果（AutoDL 的工作流）：主文件和其余的逐个下载。浏览器可能把连着点的几个下载并成一个询问，换个方式也行。
+function downloadAll(item: HistoryItem) {
+  const files = [item.mediaUrl!, ...(item.extraFiles || []).map((extra) => fileUrl(item, extra.file))];
+  files.forEach((href, index) => {
+    window.setTimeout(() => {
+      const link = document.createElement('a');
+      link.rel = 'noopener';
+      link.href = `${href}?download=1`;
+      link.setAttribute('download', '');
+      document.body.append(link);
+      link.click();
+      link.remove();
+    }, index * 150);
+  });
+}
+
 // 卡片右上角的「更多」。菜单内容按点开那一刻的状态来定：生成中的可以刷新，查询超时的可以重新查询，已完成的可以下载。
 // 已完成的视频可以拿去配乐，已完成的图片可以拿去生成视频、存为角色。
 function openCardMenu(button: HTMLElement, id: string, scope: Scope) {
@@ -206,9 +227,32 @@ function ImageView({ item, large }: { item: HistoryItem; large: boolean }) {
   );
 }
 
+// 图片结果。工作流可能一次出好几张，第一张铺满画框，其余几张在详情里并排，每张都能单独保存。
+function ImageBox({ item, large }: { item: HistoryItem; large: boolean }) {
+  const extra = item.extraFiles || [];
+  if (!extra.length) return <ImageView item={item} large={large} />;
+  return (
+    <div className={`image-set${large ? ' is-large' : ''}`}>
+      <ImageView item={item} large={large} />
+      {large && (
+        <div className="image-set-more">
+          {extra.map(({ file }) => (
+            <a key={file} className="image-set-thumb" href={`${fileUrl(item, file)}?download=1`} download rel="noopener" {...tip('下载这张图')}>
+              <Thumb thumb={fileUrl(item, file)} kind="image" />
+            </a>
+          ))}
+        </div>
+      )}
+      {!large && extra.length > 0 && <span className="badge badge-pending image-set-badge">{`共 ${extra.length + 1} 张`}</span>}
+    </div>
+  );
+}
+
+// 结果里额外的文件（AutoDL 一次可能给一组结果）的地址：和主文件在同一个目录。
+const fileUrl = (item: HistoryItem, file: string) => `${item.mediaUrl!.slice(0, item.mediaUrl!.lastIndexOf('/') + 1)}${encodeURIComponent(file)}`;
+
 function AudioView({ item, large }: { item: HistoryItem; large: boolean }) {
-  const voice = item.tool === 'speech' && item.payload?.voice_name;
-  // 详情里的配乐：原视频还在本机的话，画面和音乐一起放，才听得出配得怎么样。
+  const voice = item.tool === 'speech' && item.payload?.voice_name;  // 详情里的配乐：原视频还在本机的话，画面和音乐一起放，才听得出配得怎么样。
   const source = item.tool === 'music' && item.form?.video?.url;
   if (large && source) return <VideoPlayer src={source} soundtrack={item.mediaUrl} autoplay fit label="配乐预览" />;
   // 配乐没有提示词，写上它是给多长的视频配的。
@@ -219,7 +263,7 @@ function AudioView({ item, large }: { item: HistoryItem; large: boolean }) {
 
 function MediaBox({ item, large = false }: { item: HistoryItem; large?: boolean }) {
   if (done(item)) {
-    if (item.kind === 'image') return <ImageView item={item} large={large} />;
+    if (item.kind === 'image') return <ImageBox item={item} large={large} />;
     if (item.kind === 'audio') return <AudioView item={item} large={large} />;
     return <VideoPlayer src={item.videoUrl} poster={large ? null : item.thumbUrl} size={large ? undefined : item.media} autoplay={large} hoverPlay={!large} fit={large} frameRatio={large ? null : 16 / 9} showLength={!large} label={item.prompt || '生成的视频'} />;
   }
@@ -231,7 +275,7 @@ function MediaBox({ item, large = false }: { item: HistoryItem; large?: boolean 
         <FailureState
           title={timedOut ? '查询超时' : `${typeLabel(item)}生成失败`}
           reason={item.error?.message}
-          extra={large ? null : item.prompt}
+          extra={large ? null : nameOf(item)}
           note={timedOut ? null : refundNote(item)}
         />
       </div>
@@ -343,6 +387,14 @@ const present = ([, value]: Entry) => value != null && value !== '' && value !==
 // 型号名长，挤在一格里会从中间断行，所以「模型」独占一行。
 function paramsOf(item: HistoryItem): Entry[] {
   const p = item.payload || {};
+  // 工作流的参数是按规则填的，名字也按规则写成人话；素材在「参考素材」里看。
+  if (item.provider === 'autodl') {
+    const rules = item.workflow?.rules || {};
+    const fields = Object.entries(p)
+      .filter(([key]) => !/^(image|video|audio)$/.test(rules[key]?.type || ''))
+      .map(([key, value]): Entry => [ruleLabel(rules[key] || { type: 'string' }, key), typeof value === 'boolean' ? (value ? '开' : '关') : String(value)]);
+    return [['工作流', item.model, true], ...fields];
+  }
   // 用了技能的记录：提示词是扩写出来的，这里标出用的是哪个技能、用户原来写的是什么。
   const skill: Entry[] = item.form?.skill ? [['技能', item.form.skill.name], ['原始输入', item.form.prompt, true]] : [];
   if (item.kind === 'image') return [['模型', item.model, true], ['画面比例', p.aspect_ratio], ['分辨率', p.resolution], ['画质', p.quality ? IMAGE_QUALITY_LABELS[p.quality] || p.quality : null], ...skill];
@@ -488,8 +540,13 @@ function Detail({ item, close, nav }: { item: HistoryItem; close: () => void; na
         </button>
       )}
       {leaveTo('复用参数', reuse)}
-      {done(item) && item.kind === 'video' && leaveTo('配乐', score)}
-      {done(item) && item.kind === 'image' && leaveTo('生成视频', animate)}
+      {done(item) && item.kind === 'video' && (item.extraFiles?.length || 0) > 0 && (
+        <button className="btn" type="button" onClick={() => downloadAll(item)}>
+          下载全部（{(item.extraFiles?.length || 0) + 1} 个）
+        </button>
+      )}
+      {done(item) && item.kind === 'video' && item.provider !== 'autodl' && leaveTo('配乐', score)}
+      {done(item) && item.kind === 'image' && item.provider !== 'autodl' && leaveTo('生成视频', animate)}
       {isTimedOutTask(item) && leaveTo('重新查询', recheck)}
       {!item.savedLocally && item.status === 'completed' && !item.direct && (
         <button className="btn" onClick={() => refresh(item).then(() => toast('已重新尝试保存', 'info'))}>

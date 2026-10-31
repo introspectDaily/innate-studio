@@ -3,7 +3,7 @@
 export type { Skill } from '../../shared/skills.ts';
 
 export type Kind = 'image' | 'video' | 'audio';
-export type CreateType = 'video' | 'image' | 'speech' | 'sfx' | 'music';
+export type CreateType = 'video' | 'image' | 'speech' | 'sfx' | 'music' | 'flow';
 export type ViewId = 'create' | 'canvas' | 'materials' | 'records' | 'characters' | 'skills';
 export type Tone = 'ok' | 'pending' | 'error';
 
@@ -100,12 +100,21 @@ export interface MusicForm {
   duration: string | number;
 }
 
+// AutoDL.art 的工作流。workflow 只记是哪一个；参数规则的完整定义在选中或复用记录时现取，不存进浏览器。
+// values 是规则里的文字、数字、开关、枚举；refs 是媒体规则选的素材，键是规则里的字段名（ref_image_0 这样）。
+export interface FlowForm {
+  workflow: { uuid: string; name: string } | null;
+  values: Record<string, unknown>;
+  refs: Record<string, Ref | null>;
+}
+
 export interface Studio {
   type: CreateType;
   image: ImageForm;
   speech: SpeechForm;
   sfx: SfxForm;
   music: MusicForm;
+  flow: FlowForm;
 }
 
 export interface RefStatus {
@@ -151,6 +160,10 @@ export interface HistoryItem {
   usage?: { total_tokens?: number; completion_tokens?: number; cost_usd?: number; generated_images?: number; size?: string; text_words?: number; audio_seconds?: number };
   // 多人模式下这一条的积分：quote 是提交时预扣的，charged 是现在实际扣着的（完成后按用量结算，失败了是 0）。
   credits?: { quote: number; charged: number };
+  // AutoDL 的工作流：提交时平台给的定义快照（计费配置、参数、当时的那份规则），和平台返回的一组结果文件。
+  workflow?: { uuid: string; name: string; kind?: Kind; billing?: { price_type?: string; billing_config?: Record<string, any>; price?: number }; inputs?: Record<string, unknown>; rules?: Record<string, import('../../shared/autodl.ts').InputRule> } | null;
+  results?: { url: string; type?: string; file_type?: string; duration?: number; alias?: string; description?: string }[];
+  extraFiles?: { file: string; size: number }[];
 }
 
 
@@ -226,6 +239,21 @@ export interface AppInfo extends KeyInfo {
   aihubmixManage: KeyInfo;
   // 豆包语音那个 Key 的状态。
   speech: KeyInfo;
+  // AutoDL.art 的令牌（原样放进 Authorization，不加 Bearer）。
+  autodl: KeyInfo;
   // 查余额用的火山引擎 Access Key 的状态，keyHint 是 Access Key ID 的头尾。
   billing: KeyInfo;
+}
+
+// AutoDL.art 工作流目录里的一项。平台列表接口不带参数规则，规则在选中工作流时从详情接口取。
+export interface FlowSummary {
+  uuid: string;
+  name: string;
+  description?: string;
+  cover?: string | null;
+  priceType?: string;
+  media?: Kind[];
+  fromCredits?: number | null;
+  usage?: number;
+  rules?: Record<string, import('../../shared/autodl.ts').InputRule>;
 }

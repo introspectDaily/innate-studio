@@ -2,7 +2,7 @@
 // 这个文件单独打包，点开「管理」时才加载。
 
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { api, state, useStore, loadApp, loadModels, loadBalance, isAdmin } from './store.ts';
+import { api, state, useStore, loadApp, loadModels, loadBalance, loadFlows, isAdmin } from './store.ts';
 import { AIHUBMIX, ARK, DOUBAO_SPEECH, MINIMAX, VOLC_BILLING } from '../../shared/models.ts';
 import { fmtCredits, fmtTime } from './format.ts';
 import { Segmented, FormRow } from './ui/controls.tsx';
@@ -64,6 +64,7 @@ export default function Admin() {
           <MinimaxKey />
           <AihubmixKey />
           <SpeechKey />
+          <AutodlKey />
         </div>
       </section>
 
@@ -483,6 +484,53 @@ function SpeechKey() {
       label={`${label} API Key`}
       desc="语音、音效、配乐"
       placeholder="粘贴 API Key"
+      hasKey={hasKey}
+      keyHint={keyHint}
+      keySource={keySource}
+      onSave={save}
+      onRemove={remove}
+    />
+  );
+}
+
+// AutoDL.art 的令牌：ComfyUI 云工作流用它。令牌原样放进请求头（不加 Bearer），在 autodl.art 的个人中心里取。
+function AutodlKey() {
+  useStore('app');
+  const { hasKey, keyHint, keySource } = state.app.autodl;
+  async function save(value: string) {
+    try {
+      state.app = await api('PUT', '/api/key', { apiKey: value, service: 'autodl' });
+      await loadApp();
+      // 换了令牌，工作流目录要重新读一遍。
+      loadFlows(true);
+      toast('AutoDL.art 令牌已保存', 'success');
+      return true;
+    } catch (err) {
+      toast(message(err), 'error', 6000);
+      return false;
+    }
+  }
+
+  async function remove() {
+    const ok = await confirmDialog({ title: '清除已保存的 AutoDL.art 令牌？', message: '清除后将无法运行工作流。', okText: '清除', danger: true });
+    if (!ok) return;
+    try {
+      await api('DELETE', '/api/key?service=autodl');
+      await loadApp();
+      loadFlows(true);
+      toast('已清除', 'success');
+    } catch (err) {
+      toast(message(err), 'error');
+    }
+  }
+
+  return (
+    <KeyRow
+      name="AutoDL.art"
+      label="AutoDL.art 令牌"
+      desc="ComfyUI 云工作流（MiniMax H3、声纹克隆等）"
+      placeholder="粘贴 AutoDL.art 令牌"
+      copyHint="令牌原样使用，不需要加 Bearer 前缀。"
       hasKey={hasKey}
       keyHint={keyHint}
       keySource={keySource}

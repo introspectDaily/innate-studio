@@ -4,7 +4,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import './styles.css';
 import { App } from './App.tsx';
-import { state, on, emit, loadApp, loadModels, startHistoryLoop, needsLogin, canManage } from './store.ts';
+import { state, on, emit, loadApp, loadModels, loadFlows, startHistoryLoop, needsLogin, canManage } from './store.ts';
 import { initComposer } from './composer/state.ts';
 import { openAdmin } from './settings.tsx';
 import { toast } from './ui/layers.tsx';
@@ -35,7 +35,10 @@ async function start() {
   emit('boot');
   startHistoryLoop();
   if (state.app.hasKey) loadModels().catch(() => {});
-  else if (canManage()) openAdmin();
+  if (state.app.autodl?.hasKey) loadFlows().catch(() => {});
+  if (!state.app.hasKey) {
+    if (canManage()) openAdmin();
+  }
 }
 
 // 滚动条平时不显示：哪一块在滚就给它加上 .is-scrolling，停下一会儿再去掉。页面上所有能滚的地方都走这里。

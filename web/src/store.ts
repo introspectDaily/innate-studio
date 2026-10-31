@@ -3,7 +3,7 @@
 
 import { useSyncExternalStore } from 'react';
 import type { VideoSpec } from '../../shared/models.ts';
-import type { AppInfo, Character, CreateType, HistoryItem, Kind, Skill, ViewId, Voice } from './types.ts';
+import type { AppInfo, Character, CreateType, FlowSummary, HistoryItem, Kind, Skill, ViewId, Voice } from './types.ts';
 
 export class ApiError extends Error {
   status: number;
@@ -68,7 +68,7 @@ export const state = {
   recordsType: 'all' as CreateType | 'all',
   // 记录页看的是创作页生成的，还是画布里生成的。
   recordsSource: 'create' as 'create' | 'canvas',
-  app: { hosted: false, user: null, hasKey: false, keyHint: '', keySource: '', baseUrl: '', minimax: { hasKey: false, keyHint: '', keySource: '', baseUrl: '' }, aihubmix: { hasKey: false, keyHint: '', keySource: '', baseUrl: '' }, aihubmixManage: { hasKey: false, keyHint: '', keySource: '', baseUrl: '' }, speech: { hasKey: false, keyHint: '', keySource: '', baseUrl: '' }, billing: { hasKey: false, keyHint: '', keySource: '', baseUrl: '' } } as AppInfo,
+  app: { hosted: false, user: null, hasKey: false, keyHint: '', keySource: '', baseUrl: '', minimax: { hasKey: false, keyHint: '', keySource: '', baseUrl: '' }, aihubmix: { hasKey: false, keyHint: '', keySource: '', baseUrl: '' }, aihubmixManage: { hasKey: false, keyHint: '', keySource: '', baseUrl: '' }, speech: { hasKey: false, keyHint: '', keySource: '', baseUrl: '' }, autodl: { hasKey: false, keyHint: '', keySource: '', baseUrl: '' }, billing: { hasKey: false, keyHint: '', keySource: '', baseUrl: '' } } as AppInfo,
   models: [] as string[],
   // 每个视频模型各自支持什么（分辨率、比例、时长、首尾帧），由本地服务随模型列表一起给。
   videoSpecs: {} as Record<string, VideoSpec>,
@@ -78,6 +78,8 @@ export const state = {
   catalog: { known: false, image: [] as string[], imageRatios: {} as Record<string, string[]>, imageRefs: {} as Record<string, number>, imageSizes: {} as Record<string, { options: string[]; default: string }>, imageQualities: {} as Record<string, { options: string[]; default: string }>, polish: [] as string[], unavailable: [] as string[] },
   voices: null as Voice[] | null,
   history: [] as HistoryItem[],
+  // AutoDL.art 的工作流目录（带起价和必填素材的种类）。loaded 表示已经从服务端读过一次。
+  flows: { hasKey: false, total: 0, items: [] as FlowSummary[], loaded: false, error: '' },
   historyLoaded: false,
   // 角色和技能。null 是还没读过。
   characters: null as Character[] | null,
@@ -91,7 +93,7 @@ export const state = {
   aihubmixBalance: null as { remaining: number | null; error?: string } | null,
 };
 
-export type StoreEvent = 'boot' | 'view' | 'app' | 'models' | 'history' | 'createType' | 'recordsType' | 'recordsSource' | 'composer' | 'immersive' | 'characters' | 'skills' | 'balance';
+export type StoreEvent = 'boot' | 'view' | 'app' | 'models' | 'history' | 'createType' | 'recordsType' | 'recordsSource' | 'composer' | 'immersive' | 'characters' | 'skills' | 'balance' | 'flows';
 
 const listeners: Partial<Record<StoreEvent, Set<() => void>>> = {};
 const versions: Partial<Record<StoreEvent, number>> = {};
@@ -198,6 +200,19 @@ export async function loadModels() {
 export async function loadVoices() {
   if (!state.voices) state.voices = (await api('GET', '/api/voices')).items;
   return state.voices;
+}
+
+// AutoDL.art 的工作流目录。服务端缓存一分钟，这里每次打开「工作流」时读一次，换了令牌也能马上看到。
+export async function loadFlows(force = false) {
+  if (state.flows.loaded && !force) return state.flows.items;
+  try {
+    const data = await api<{ hasKey: boolean; total: number; items: FlowSummary[] }>('GET', '/api/autodl/workflows');
+    state.flows = { hasKey: data.hasKey, total: data.total, items: data.items || [], loaded: true, error: '' };
+  } catch (err) {
+    state.flows = { ...state.flows, loaded: true, error: (err as Error).message };
+  }
+  emit('flows');
+  return state.flows.items;
 }
 
 // 润色提示词用哪个文本模型。选择存在浏览器里；没选过或选的已经不可用，就用列表里的第一个。

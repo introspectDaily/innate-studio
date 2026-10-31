@@ -24,6 +24,17 @@ export const VOLC_BILLING = { baseUrl: trimSlash(process.env.VOLC_BILLING_BASE_U
 // 豆包语音：语音合成、音效、配乐用它。它是另一个产品，地址和 Key 都和方舟不是一套。
 // seed-tts-2.0 是「豆包语音合成模型 2.0」，seed-audio-1.0 是「豆包音频生成模型 1.0」。
 export const DOUBAO_SPEECH = { label: '豆包语音', baseUrl: trimSlash(process.env.DOUBAO_SPEECH_BASE_URL || 'https://openspeech.bytedance.com'), envKey: 'DOUBAO_SPEECH_API_KEY', configKey: 'doubaoSpeechKey', model: SPEECH_MODEL, audioModel: AUDIO_MODEL };
+// AutoDL.art：ComfyUI 云工作流。工作流目录由平台在线给出，表单按每个工作流的 input_rules 生成。
+// 认证方式和其他平台不同：令牌原样放进 Authorization，不加 Bearer。
+// 环境变量优先认 AUTODL_ART_API_KEY（控制台叫「令牌」），也认早期脚本用的 AUTODL_TOKEN。
+// 不带 www 的域名解析不到，接口在 www.autodl.art 上。
+export const AUTODL = {
+  label: 'AutoDL.art',
+  baseUrl: trimSlash(process.env.AUTODL_BASE_URL || 'https://www.autodl.art'),
+  envKey: 'AUTODL_ART_API_KEY',
+  envKeys: ['AUTODL_ART_API_KEY', 'AUTODL_TOKEN'],
+  configKey: 'autodlToken',
+};
 
 // 环境变量原来叫 SEEDANCE_*（项目改名前），旧名字还认。
 export const DATA_DIR = path.resolve(process.env.INNATE_DATA_DIR || process.env.SEEDANCE_DATA_DIR || path.join(ROOT, 'data'));

@@ -1,6 +1,6 @@
 // 账号这一组接口：Key 的状态和存取、能用的模型、余额。
 
-import { AIHUBMIX, AIHUBMIX_MANAGE, ARK, DOUBAO_SPEECH, MINIMAX, VOLC_BILLING } from '../config.js';
+import { AIHUBMIX, AIHUBMIX_MANAGE, ARK, AUTODL, DOUBAO_SPEECH, MINIMAX, VOLC_BILLING } from '../config.js';
 import { HttpError, readJsonBody, route } from '../http.js';
 import { config, saveConfig } from '../store.js';
 import { aihubmixKey, aihubmixManageKey, apiKey, billingKeys, keyState, isUsableKey, badKeyMessage, minimaxKey } from '../keys.js';
@@ -10,7 +10,7 @@ import { minimaxBalance, queryAihubmixBalance, queryBalance } from '../billing.j
 import { VIDEO_TASKS_PATH } from '../tasks.js';
 import { VIDEO_MODELS, IMAGE_MODELS, ARK_TEXT_MODELS, imageProvider, videoProvider } from '../../shared/models.ts';
 
-const KEY_SERVICES = { speech: DOUBAO_SPEECH, minimax: MINIMAX, aihubmix: AIHUBMIX, 'aihubmix-manage': AIHUBMIX_MANAGE };
+const KEY_SERVICES = { speech: DOUBAO_SPEECH, minimax: MINIMAX, aihubmix: AIHUBMIX, 'aihubmix-manage': AIHUBMIX_MANAGE, autodl: AUTODL };
 
 // hosted 是多人模式，这时 user 是登录着的账号（没登录是 null，页面据此显示登录框）。
 // 多人模式下 Key 的状态只给管理员；成员只知道服务能不能用（hasKey），接了哪些平台、各自配没配都不给。

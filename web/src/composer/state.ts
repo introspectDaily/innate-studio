@@ -1,26 +1,29 @@
 // 创作输入框的状态和动作：正在编辑的表单、润色、音色试听、提交。界面在 Composer.tsx，把表单拼成请求的逻辑在 request.ts。
 // 这里改完状态都要调 changed()，输入框才会重画。
 
-import { api, state, on, emit, KINDS, startHistoryLoop, loadVoices, polishModel, goTo, usesCredits, type ApiError } from '../store.ts';
+import { api, state, on, emit, KINDS, startHistoryLoop, loadVoices, loadFlows, polishModel, goTo, usesCredits, type ApiError } from '../store.ts';
 import { fmtCredits } from '../format.ts';
 import { exclusive } from '../playback.ts';
 import { refFromRecord, kindOfFile, uploadLocalFile } from '../media.ts';
 import { toast } from '../ui/layers.tsx';
 import { buildVideoRequest, buildImageRequest, buildSpeechRequest, buildSfxRequest, buildMusicRequest, refsInUse, carryRefs } from '../request.ts';
 import { quoteCost, toCredits, type VideoSpec } from '../../../shared/models.ts';
-import type { BuiltRequest, Character, CreateType, HistoryItem, Kind, Ref, SkillRef, Studio, VideoForm, Voice } from '../types.ts';
+import { workflowCost, cleanInputs, formValues, ruleKind, ruleLabel, type InputRule, type WorkflowSummary } from '../../../shared/autodl.ts';
+import type { BuiltRequest, Character, CreateType, FlowSummary, HistoryItem, Kind, Ref, SkillRef, Studio, VideoForm, Voice } from '../types.ts';
 
 // 视频的表单单独存一份（生成记录里存的也是它）；当前选的类型和其余几种的表单存在另一份里。
 const FORM_KEY = 'innate-studio.form.v1';
 const STUDIO_KEY = 'innate-studio.studio.v1';
 
-// 能生成的五种内容。polish 表示这种内容的文字可以让模型帮忙润色：提示词是补得更具体，要朗读的文稿是改得更适合朗读。
+// 能生成的六种内容。polish 表示这种内容的文字可以让模型帮忙润色：提示词是补得更具体，要朗读的文稿是改得更适合朗读。
+// 工作流没有固定的提示词框：参数是按平台给出的规则画的，所以不写 placeholder、不润色。
 export const TYPES: { value: CreateType; label: string; title: string; action: string; polish?: boolean; placeholder?: string }[] = [
   { value: 'video', label: '视频', title: '想生成什么视频？', action: '生成视频', polish: true, placeholder: '描述主体、动作、场景、运镜、光线与风格' },
   { value: 'image', label: '图片', title: '想生成什么图片？', action: '生成图片', polish: true, placeholder: '描述主体、环境、构图、光线与风格' },
   { value: 'speech', label: '语音', title: '想让它读什么？', action: '生成语音', polish: true, placeholder: '输入朗读文本' },
   { value: 'sfx', label: '音效', title: '想要什么声音？', action: '生成音效', polish: true, placeholder: '描述声音的来源、材质与动作' },
   { value: 'music', label: '配乐', title: '想要什么配乐？', action: '生成配乐', polish: true, placeholder: '描述风格、情绪、节奏与乐器' },
+  { value: 'flow', label: '工作流', title: '想用哪个工作流？', action: '运行工作流' },
 ];
 
 export const RATIOS = [
@@ -53,6 +56,7 @@ const studioDefaults = (): Studio => ({
   speech: { prompt: '', voiceId: '', voiceName: '' },
   sfx: { prompt: '', duration: 'auto' },
   music: { prompt: '', video: null, duration: 30 },
+  flow: { workflow: null, values: {}, refs: {} },
 });
 
 // 以前存下的表单、别的平台留下的记录里，可能带着现在用不了的素材。只留本机的文件和公网链接。
@@ -76,12 +80,20 @@ function mergeForm(saved: Partial<VideoForm> | null): VideoForm {
 function mergeStudio(saved: Partial<Studio> | null): Studio {
   const base = studioDefaults();
   if (!saved || typeof saved !== 'object') return base;
+  const flow = (saved.flow || {}) as Partial<Studio['flow']>;
+  const refs = (flow.refs || {}) as Record<string, Ref | null>;
   return {
     type: TYPES.some((t) => t.value === saved.type) ? saved.type! : base.type,
     image: { ...base.image, ...(saved.image || {}), refs: (saved.image?.refs || []).filter(usable) },
     speech: { ...base.speech, ...(saved.speech || {}) },
     sfx: { ...base.sfx, ...(saved.sfx || {}) },
     music: { ...base.music, ...(saved.music || {}) },
+    // 工作流只记选的是哪一个和已经填的值；规则在选中时重新取，上次没填完的参数按规则筛一遍。
+    flow: {
+      workflow: flow.workflow?.uuid ? { uuid: String(flow.workflow.uuid), name: String(flow.workflow.name || '') } : null,
+      values: flow.values && typeof flow.values === 'object' ? { ...flow.values } : {},
+      refs: Object.fromEntries(Object.entries(refs).filter(([, ref]) => usable(ref))) as Record<string, Ref | null>,
+    },
   };
 }
 
@@ -110,6 +122,8 @@ export const composer = {
   beforePolish: null as string | null,
   polishing: false,
   voicesError: '',
+  // 工作流的定义没取到时（令牌失效、平台不通）写在这里，输入框里显示出来。
+  flowsError: '',
   voiceFilter: 'all' as 'all' | 'zh' | 'en' | 'other',
   // 正在试听的音色。
   previewing: '',
@@ -119,12 +133,24 @@ state.createType = composer.studio.type;
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
 
 export const typeOf = (value: CreateType = composer.studio.type) => TYPES.find((t) => t.value === value) || TYPES[0];
-// 当前类型正在编辑的那份表单里的文字。
-export const draftPrompt = () => (composer.studio.type === 'video' ? composer.form.prompt : composer.studio[composer.studio.type].prompt) || '';
+// 当前类型正在编辑的那份表单里的文字。工作流的主文本是规则里第一段文字（prompt、prompt_text）。
+export const draftPrompt = () => {
+  const { type } = composer.studio;
+  if (type === 'video') return composer.form.prompt;
+  if (type === 'flow') {
+    const key = flowPrimaryKey();
+    const value = key ? composer.studio.flow.values[key] : '';
+    return typeof value === 'string' ? value : '';
+  }
+  return composer.studio[type].prompt || '';
+};
 function writePrompt(text: string) {
   const { type } = composer.studio;
   if (type === 'video') composer.form.prompt = text;
-  else composer.studio[type].prompt = text;
+  else if (type === 'flow') {
+    const key = flowPrimaryKey();
+    if (key) composer.studio.flow.values = { ...composer.studio.flow.values, [key]: text };
+  } else composer.studio[type].prompt = text;
 }
 
 function persist() {
@@ -145,9 +171,216 @@ export const specOf = (model = composer.form.model) => state.videoSpecs[model] |
 
 const allRefs = () => refsInUse(composer.form);
 
+// ---------- AutoDL.art 的工作流 ----------
+// 选中的工作流是哪一种、参数规则是什么。规则在选中时从详情接口取一份放在内存里（目录接口不带规则）；
+// 复用记录时用记录里存的那一份，平台之后改了规则也还原得回去。
+type Flow = Pick<WorkflowSummary, 'uuid' | 'name' | 'description' | 'price' | 'price_type' | 'billing_config' | 'input_rules'>;
+const MAX_FLOWS = 8;
+const flowCache = new Map<string, Flow>();
+const patch = (prev: Record<string, unknown>, next: Record<string, unknown>) => ({ ...prev, ...next });
+
+export const flowForm = () => composer.studio.flow;
+// 选中的工作流的完整定义；还没取到时是 null。
+export const flowDefinition = (): Flow | null => {
+  const { workflow } = composer.studio.flow;
+  return workflow ? flowCache.get(workflow.uuid) || null : null;
+};
+// 选中的工作流放在内存里的定义（测试和演示会直接塞一份）。
+export function rememberFlow(flow: Flow) {
+  flowCache.delete(flow.uuid);
+  flowCache.set(flow.uuid, flow);
+  while (flowCache.size > MAX_FLOWS) flowCache.delete(flowCache.keys().next().value!);
+  emit('composer');
+}
+async function fetchFlow(uuid: string, force = false): Promise<Flow | null> {
+  if (!force && flowCache.has(uuid)) return flowCache.get(uuid)!;
+  try {
+    const { workflow } = await api<{ workflow: WorkflowSummary }>('GET', `/api/autodl/workflows/${encodeURIComponent(uuid)}`);
+    rememberFlow(workflow);
+    return workflow;
+  } catch (err) {
+    // 目录里带出来的规则也够画表单了：拿它当一份定义，详情只是补充说明和计费快照。
+    const summary = state.flows.items.find((item) => item.uuid === uuid);
+    if (summary?.rules && Object.keys(summary.rules).length) return { uuid, name: summary.name, description: summary.description, input_rules: summary.rules } as Flow;
+    composer.flowsError = (err as Error).message;
+    emit('composer');
+    return null;
+  }
+}
+// 工作流记在记录上的名字。目录还没读到、记录里也没存名字时用 uuid。
+export const flowName = () => composer.studio.flow.workflow?.name || '工作流';
+// 工作流是干什么的：平台上给的说明。
+export const flowAbout = () => flowDefinition()?.description || '';
+
+// 工作流里要填的文字字段（string / prompt）。输入框里的主文本用第一段：优先 prompt、prompt_text。
+export function flowTextRules(): [string, InputRule][] {
+  return Object.entries(flowDefinition()?.input_rules || {}).filter(([, rule]) => rule.type === 'string' || rule.type === 'prompt');
+}
+export function flowPrimaryKey(): string | null {
+  const entries = flowTextRules();
+  return (entries.find(([key]) => key === 'prompt') || entries.find(([key]) => key === 'prompt_text') || entries[0])?.[0] || null;
+}
+
+// 记录上的提示词：规则里第一段填了的文字（服务端建记录时也是这么取）。
+export function flowPrompt(flow: { input_rules?: Record<string, InputRule> } | null): string {
+  const { values } = composer.studio.flow;
+  for (const [key, rule] of Object.entries(flow?.input_rules || {})) {
+    if (rule.type !== 'string' && rule.type !== 'prompt') continue;
+    const text = typeof values[key] === 'string' ? String(values[key]).trim() : '';
+    if (text) return text;
+  }
+  return '';
+}
+
+// 换了工作流：从目录里找到它，取一份完整定义，按规则给表单铺初始值。上次填的值里规则还在的留着，规则已经变了的丢掉。
+// 同一条工作流重新选一次是把表单恢复成默认值。
+export async function selectFlow(uuid: string, options: { restore?: Record<string, unknown>; rules?: Record<string, InputRule>; restoreRefs?: Record<string, Ref | null> } = {}) {
+  const summary = state.flows.items.find((item) => item.uuid === uuid);
+  const same = composer.studio.flow.workflow?.uuid === uuid;
+  composer.studio.flow.workflow = { uuid, name: summary?.name || composer.studio.flow.workflow?.name || uuid };
+  composer.studio.flow.values = {};
+  composer.studio.flow.refs = {};
+  composer.flowsError = '';
+  persist();
+  changed();
+  const workflow = await fetchFlow(uuid, !same || Boolean(options.restore));
+  if (!workflow || composer.studio.flow.workflow?.uuid !== uuid) return;
+  const definition = options.rules ? { ...workflow, input_rules: options.rules } : workflow;
+  const defaults = formValues(definition);
+  const wanted = options.restore || {};
+  const values: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(defaults)) {
+    const rule = definition.input_rules?.[key];
+    if (!rule) continue;
+    const given = wanted[key];
+    // 只有形状对得上的才恢复：文字给文字，数字给数字，开关给开关，枚举必须在选项里。
+    const fits =
+      given !== undefined &&
+      given !== null &&
+      (rule.type === 'string' || rule.type === 'prompt' ? typeof given === 'string' : rule.type === 'integer' || rule.type === 'number' ? Number.isFinite(Number(given)) : rule.type === 'boolean' ? typeof given === 'boolean' : rule.type === 'enum' ? (rule.options || []).some((option) => option.label === given) : false);
+    values[key] = fits ? given : value;
+  }
+  // 素材也带过去，但只放在类型对得上的位置（换到要参考音频的工作流，原来的图片不硬塞进去）。
+  const refs: Record<string, Ref | null> = {};
+  for (const [key, ref] of Object.entries(options.restoreRefs || {})) {
+    const rule = definition.input_rules?.[key];
+    if (rule && (rule.type === 'image' || rule.type === 'video' || rule.type === 'audio') && rule.type === ref?.kind && usable(ref)) refs[key] = ref;
+  }
+  composer.studio.flow.values = values;
+  composer.studio.flow.refs = refs;
+  persist();
+  changed();
+}
+
+// 换了工作流（刷新目录后选中一个）：主文本（提示词、朗读文本）和素材留着，规律一样的参数也留着——
+// 平台上那二十几个 H3 工作流大多是同一组参数，换个工作流不用重填。新工作流多出来的字段按默认值，没有的字段丢掉。
+export async function pickFlow(uuid: string) {
+  if (composer.studio.flow.workflow?.uuid === uuid) return;
+  const { values, refs } = composer.studio.flow;
+  const restore: Record<string, unknown> = {};
+  for (const [key, rule] of flowTextRules()) if (typeof values[key] === 'string' && values[key]) restore[key] = values[key];
+  await selectFlow(uuid, { restore, restoreRefs: refs });
+}
+
+// 填规则里的一个值。
+export function setFlowValue(key: string, value: unknown) {
+  composer.studio.flow.values = patch(composer.studio.flow.values, { [key]: value });
+  composer.submitError = '';
+  persist();
+  changed();
+}
+// 给媒体规则放一份素材（null 是拿掉）。
+export function setFlowRef(key: string, ref: Ref | null) {
+  composer.studio.flow.refs = { ...composer.studio.flow.refs, [key]: ref };
+  composer.submitError = '';
+  persist();
+  changed();
+}
+
+// 工作流里某一类素材的空槽：字段名。拖进来的文件按顺序放进第一个空的。没有空槽时是 null。
+export function firstEmptySlot(kind: Kind): string | null {
+  const flow = flowDefinition();
+  const refs = composer.studio.flow.refs;
+  for (const [key, rule] of Object.entries(flow?.input_rules || {})) {
+    if (rule.type === kind && !refs[key]) return key;
+  }
+  return null;
+}
+// 工作流总共要几份这种素材：给按规则画出来的媒体格子和拖入时的提示用。
+export function flowSlots(kind: Kind): { key: string; rule: InputRule }[] {
+  const flow = flowDefinition();
+  return Object.entries(flow?.input_rules || {})
+    .filter(([, rule]) => rule.type === kind)
+    .map(([key, rule]) => ({ key, rule }));
+}
+
+// 按规则检查现在填的参数：补默认值、删空项、查长度和范围。返回要提交的 inputs 和问题。
+let lastFlowInputs: Record<string, unknown> = {};
+export function flowInputs(): { inputs: Record<string, unknown>; problems: string[] } {
+  const flow = flowDefinition();
+  if (!flow) return { inputs: {}, problems: [composer.flowsError ? `工作流加载失败：${composer.flowsError}` : '请先选择工作流'] };
+  const { values, refs } = composer.studio.flow;
+  const raw: Record<string, unknown> = {};
+  for (const [key, rule] of Object.entries(flow.input_rules || {})) {
+    const kind = ruleKind(rule);
+    if (kind === 'media') {
+      const ref = refs[key];
+      if (ref) raw[key] = ref.url;
+    } else if (kind === 'number') {
+      const text = values[key];
+      if (text !== '' && text != null) raw[key] = Number(text);
+    } else if (kind === 'toggle') {
+      if (values[key] !== undefined) raw[key] = values[key];
+    } else if (kind === 'select') {
+      if (values[key]) raw[key] = values[key];
+    } else if (values[key] !== '' && values[key] != null) {
+      raw[key] = values[key];
+    }
+  }
+  const result = cleanInputs(flow.input_rules || {}, raw);
+  lastFlowInputs = result.inputs;
+  return result;
+}
+// 按秒计费的工作流要知道要生成多长：duration、audio_duration 这类数字参数，或者参考素材自己的时长。
+export function flowSeconds(): number {
+  const flow = flowDefinition();
+  for (const [key, rule] of Object.entries(flow?.input_rules || {})) {
+    if (rule.type !== 'integer' && rule.type !== 'number') continue;
+    if (!/duration|seconds/i.test(key)) continue;
+    const value = Number(composer.studio.flow.values[key]);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  return 0;
+}
+// 这次大约多少积分。和目录里的起价、服务端预扣用的是同一个算法（shared/autodl.ts 的 workflowCost）。
+export function flowCredits(): number | null {
+  const flow = flowDefinition();
+  if (!flow) return null;
+  const yuan = workflowCost(flow, lastFlowInputs, flowSeconds());
+  return yuan == null ? null : toCredits(yuan);
+}
+
+// 把一条工作流记录的参数填回输入框：工作流、规则、填的值、用的素材。记录里存了当时的那份规则就用它。
+export async function setFlow(item: HistoryItem) {
+  const snapshot = item.workflow || null;
+  const uuid = snapshot?.uuid || (item.form?.workflow as { uuid?: string } | undefined)?.uuid;
+  if (!uuid) return;
+  const restore: Record<string, unknown> = { ...(snapshot?.inputs || {}) };
+  // 数字规则存的是数、输入框里是字：按记录里的输入框形状还原。
+  if (item.form?.values && typeof item.form.values === 'object') Object.assign(restore, item.form.values);
+  await selectFlow(String(uuid), { restore, ...(snapshot?.rules ? { rules: snapshot.rules } : {}), ...(item.form?.refs ? { restoreRefs: item.form.refs as Record<string, Ref | null> } : {}) });
+  setType('flow');
+}
+
+// ---------- 提交 ----------
+
 // 当前类型的请求和不能提交的原因。prompt 是技能扩写出来的提示词：给了就用它代替输入框里的那句话。
 export function currentRequest(prompt?: string): BuiltRequest {
   const { studio } = composer;
+  if (studio.type === 'flow') {
+    const { inputs, problems } = flowInputs();
+    return { payload: inputs, problems };
+  }
   if (studio.type === 'image') return buildImageRequest(prompt === undefined ? studio.image : { ...studio.image, prompt }, imageRefLimit());
   if (studio.type === 'speech') return buildSpeechRequest(studio.speech);
   if (studio.type === 'sfx') return buildSfxRequest(studio.sfx);
@@ -172,6 +405,7 @@ export function submitProblem(): string {
 export function currentCredits(): number | null {
   const { type } = composer.studio;
   const { payload, body } = currentRequest();
+  if (type === 'flow') return flowCredits();
   if (type === 'video' || type === 'image') {
     const yuan = quoteCost({ kind: type, model: String(payload?.model || ''), payload });
     return yuan == null ? null : toCredits(yuan) * (type === 'image' ? Number(payload?.n) || 1 : 1);
@@ -244,6 +478,10 @@ export const hasLastFrame = (model = composer.form.model) => specOf(model).frame
 // 当前类型和生成方式下，每种素材还能加几份。一种都不能加时是空的。
 export function mediaRoom(): Partial<Record<Kind, number>> {
   const { form, studio } = composer;
+  if (studio.type === 'flow') {
+    const used = studio.flow.refs;
+    return Object.fromEntries((['image', 'video', 'audio'] as Kind[]).map((kind) => [kind, flowSlots(kind).filter(({ key }) => !used[key]).length]).filter(([, left]) => (left as number) > 0));
+  }
   if (studio.type === 'image') return imageRefLimit() ? { image: imageRefLimit() - (studio.image.refs?.length || 0) } : {};
   if (studio.type === 'music') return { video: 1 };
   if (studio.type !== 'video' || form.mode === 'text') return {};
@@ -254,7 +492,7 @@ export function mediaRoom(): Partial<Record<Kind, number>> {
 // 已经用上的本机文件的地址：选素材时同一份不让加第二次。
 export function usedMediaUrls() {
   const { studio } = composer;
-  const refs = studio.type === 'image' ? studio.image.refs || [] : studio.type === 'music' ? [studio.music.video] : allRefs();
+  const refs = studio.type === 'flow' ? Object.values(studio.flow.refs) : studio.type === 'image' ? studio.image.refs || [] : studio.type === 'music' ? [studio.music.video] : allRefs();
   return refs.filter((ref): ref is Ref => Boolean(ref)).map((ref) => ref.url);
 }
 
@@ -262,6 +500,13 @@ export function usedMediaUrls() {
 export function addMedia(ref: Ref, slot?: 'first' | 'last'): string | null {
   const { form, studio } = composer;
   const label = KINDS[ref.kind].label;
+  if (studio.type === 'flow') {
+    // 工作流的素材槽是规则的字段名。拖进来的文件放进第一个空着、类型对得上的槽里。
+    const key = firstEmptySlot(ref.kind);
+    if (!key) return `当前工作流没有空着的${label}位`;
+    setFlowRef(key, ref);
+    return null;
+  }
   if (studio.type === 'music') {
     if (ref.kind !== 'video') return '请添加视频文件';
     updateStudio('music', { video: ref });
@@ -358,6 +603,14 @@ function fitImage() {
 export function updateStudio<T extends 'image' | 'speech' | 'sfx' | 'music'>(type: T, patch: Partial<Studio[T]>) {
   Object.assign(composer.studio[type], patch);
   if (type === 'image') fitImage();
+  composer.submitError = '';
+  persist();
+  changed();
+}
+
+// 把整份工作流表单（选的工作流、填的值、用的素材）换掉：复用记录时用，记录里有当时的那份规则。
+export function setFlowForm(next: Studio['flow']) {
+  composer.studio.flow = { workflow: next.workflow, values: { ...next.values }, refs: { ...next.refs } };
   composer.submitError = '';
   persist();
   changed();
@@ -583,7 +836,11 @@ export async function submit() {
     }
     if (type === 'video') await api('POST', '/api/videos', { payload: request.payload, form });
     else if (type === 'image') await api('POST', '/api/images', { payload: request.payload, form: { type, ...studio.image } });
-    else await api('POST', `/api/audio/${type}`, { ...request.body, form: { type, ...studio[type] } });
+    else if (type === 'flow') {
+      // 工作流只给服务端工作流的 uuid 和填的值；素材的地址是记录里的短地址或链接，服务端负责内嵌或换公网直链。
+      const { workflow, refs, values } = studio.flow;
+      await api('POST', '/api/autodl/submit', { workflow: workflow!.uuid, inputs: request.payload, form: { type, workflow, values, refs } });
+    } else await api('POST', `/api/audio/${type}`, { ...request.body, form: { type, ...studio[type] } });
     toast('已提交', 'success');
     startHistoryLoop();
   } catch (err) {
@@ -646,6 +903,26 @@ export function initComposer() {
     if (state.app.hasKey && info.source === 'default' && info.error) toast(`模型列表加载失败，已显示默认模型。${info.error}`, 'error', 6000);
     changed();
   });
+  // 读到工作流目录之后，上次选的工作流还在的话把它的规则取回来（表单按规则画）。已经填着的值不动。
+  on('flows', () => {
+    loadFlowDefinition();
+    changed();
+  });
+}
+
+// 选中了工作流、但规则还没取到（页面刚打开、目录刚读到）：取一份，按规则把缺的默认值补上，已经填的值留着。
+export async function loadFlowDefinition() {
+  const { workflow } = composer.studio.flow;
+  if (!workflow || flowCache.has(workflow.uuid)) return;
+  const flow = await fetchFlow(workflow.uuid);
+  if (!flow || composer.studio.flow.workflow?.uuid !== workflow.uuid) return;
+  const defaults = formValues(flow);
+  const values: Record<string, unknown> = {};
+  const current = composer.studio.flow.values;
+  for (const [key, value] of Object.entries(defaults)) values[key] = current[key] !== undefined ? current[key] : value;
+  composer.studio.flow.values = values;
+  persist();
+  changed();
 }
 
 export function dismissSubmitError() {

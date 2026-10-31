@@ -12,6 +12,8 @@
 // - MiniMax（另一个平台，另一个 Key）：/v2/video_generation 建任务，/v2/query/video_generation/{id} 查任务，形状按它的文档写（2026-10-09 读的）。提示词里带 FAIL 时任务失败
 // - AiHubMix（聚合平台，另一个 Key）：/ai/v1/images/generations 同步出图，返回任务对象，形状按它的《异步任务》文档写。提示词里带 FAIL 时任务失败，带 BYURL 时图片给的是下载地址（下载要带 Key），带 NOASYNC 时返回 403
 // - 豆包语音（另一个产品，另一个 Key）：音频分两段返回，文字里带 FAIL 时在流里返回出错的 code
+// - AutoDL.art（ComfyUI 云工作流，另一个令牌，原样放在 Authorization 里、不加 Bearer）：列工作流、取定义、提交、查结果都裹着 {code, data, msg}。
+//   列表里没有规则（和线上一样）；提示词里带 FAIL 时任务失败。结果给一组文件，按时间走 QUEUED → RUNNING → SUCCESS
 
 import http from 'node:http';
 import fs from 'node:fs';
@@ -22,15 +24,65 @@ export const MOCK_MINIMAX_KEY = 'mock-minimax-cn-key-0001';
 export const MOCK_AIHUBMIX_KEY = 'sk-mock-aihubmix-key-0001';
 export const MOCK_AIHUBMIX_MANAGE_KEY = 'mock-aihubmix-manage-key-0001';
 export const MOCK_SPEECH_KEY = 'mock-doubao-speech-key-0001';
+export const MOCK_AUTODL_TOKEN = 'mock-autodl-token-0123456789';
 export const MOCK_ACCESS_KEY = { id: 'AKLTmockaccesskeyid0001', secret: 'bW9ja3NlY3JldGFjY2Vzc2tleQ==' };
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+
+// 模拟平台上的两个工作流：一个按分辨率计价、出视频，一个按秒计价、出音频。
+// 规则里故意带上线上见过的几种写法：枚举、按秒计费的时长、九张参考图、default_local_path 占位。
+const AUTODL_WORKFLOWS = [
+  {
+    uuid: 'minimax_h3_demo',
+    name: 'MiniMax H3 示例',
+    description: '用一张参考图和一段提示词生成视频',
+    cover_image_url: '',
+    price: 0,
+    price_type: 'minimax_h3',
+    billing_config: { minimax_h3: [{ resolution: '480p', price: 50, off_peak_price: 40 }, { resolution: '768p', price: 60, off_peak_price: 50 }] },
+    usage_count_7d: 120,
+    version: '1',
+    input_rules: {
+      prompt: { type: 'string', required: true, min_length: 1, max_length: 20000 },
+      duration: { type: 'integer', default: 5, min: 1, max: 15 },
+      resolution: { type: 'enum', default: '768p竖', options: [{ label: '480p横' }, { label: '480p竖' }, { label: '768p横' }, { label: '768p竖' }] },
+      mode: { type: 'enum', default: '高质模式', options: [{ label: '高速模式' }, { label: '高质模式' }] },
+      ref_image_0: { type: 'image', required: true, default: 'default_local_path:/blank.png;https://example.com/blank.png', accept_types: ['image/jpeg', 'image/png', 'image/webp'] },
+      ref_image_1: { type: 'image', default: 'default_local_path:/blank.png;https://example.com/blank.png', accept_types: ['image/jpeg', 'image/png', 'image/webp'] },
+      seed: { type: 'integer', default: 123, min: 1, max: 999999999999999 },
+    },
+    input_example: '{"prompt": "一只猫在草地上跑"}',
+    output_example: '{"data": {"results": [{"url": "https://example.com/a.mp4", "type": "video", "file_type": "mp4"}]}}',
+  },
+  {
+    uuid: 'indextts_demo',
+    name: '声纹克隆示例',
+    description: '用一段参考音频朗读文本',
+    price: 0,
+    price_type: 'audio_sec_cost',
+    billing_config: { audio_sec_cost: { price: 1, off_peak_price: 1, minimum_price: 10 } },
+    usage_count_7d: 67123,
+    version: '1',
+    input_rules: {
+      prompt_text: { type: 'string', required: true, min_length: 1, max_length: 2048 },
+      prompt_simple: { type: 'audio', required: true, accept_types: ['audio/mpeg', 'audio/wav'] },
+      emo_control_method: { type: 'enum', required: true, default: '与音色参考音频相同', options: [{ label: '与音色参考音频相同' }, { label: '使用情感参考音频' }] },
+      emo_happy: { type: 'number', default: 0, min: 0, max: 1.4 },
+      emo_random: { type: 'boolean', default: false },
+      emo_ref_audio: { type: 'audio', accept_types: ['audio/mpeg', 'audio/wav'] },
+    },
+    input_example: '{"prompt_text": "你好"}',
+    output_example: '{"data": {"results": [{"url": "https://example.com/a.wav", "type": "audio", "file_type": "wav"}]}}',
+  },
+];
 
 // sampleFile、imageFile、audioFile：调界面时让生成结果是能看能听的真实文件。
 export function startMock({ port = 0, taskSeconds = 14, sampleFile = '', imageFile = '', audioFile = '' } = {}) {
   // 生成结果的内容。测试可以中途换掉（files.picture = …）。
   const files = { sample: sampleFile ? fs.readFileSync(sampleFile) : null, picture: imageFile ? fs.readFileSync(imageFile) : PNG, sound: audioFile ? fs.readFileSync(audioFile) : null };
   const tasks = new Map();
+  // AutoDL 的任务：提交的参数、开始时间、是不是要失败。
+  const autodlTasks = new Map();
   const log = [];
 
   const json = (res, status, body) => {
@@ -67,6 +119,15 @@ export function startMock({ port = 0, taskSeconds = 14, sampleFile = '', imageFi
     if (req.method === 'GET' && file && tasks.has(file[1])) {
       const bytes = files.sample || Buffer.from(`mock ark video ${file[1]}`);
       res.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Length': bytes.length });
+      return res.end(bytes);
+    }
+
+    // AutoDL 的结果文件：和别的平台一样放在对象存储上，下载不用令牌。音频给 wav，其余给视频。
+    const result = /^\/autodl-files\/([\w-]+)\.(mp4|wav|mp3|png)$/.exec(pathname);
+    if (req.method === 'GET' && result && autodlTasks.has(result[1])) {
+      const type = { mp4: 'video/mp4', wav: 'audio/wav', mp3: 'audio/mpeg', png: 'image/png' }[result[2]];
+      const bytes = result[2] === 'mp4' ? files.sample || Buffer.from(`mock autodl video ${result[1]}`) : result[2] === 'png' ? files.picture : files.sound || Buffer.from(`mock autodl audio ${result[1]}`);
+      res.writeHead(200, { 'Content-Type': type, 'Content-Length': bytes.length });
       return res.end(bytes);
     }
 
@@ -147,6 +208,45 @@ export function startMock({ port = 0, taskSeconds = 14, sampleFile = '', imageFi
       return json(res, 500, { type: 'error', error: { type: 'server_error', message: 'record not found (1000)', http_code: '500' }, request_id: 'mock' });
     }
 
+    // AutoDL.art：令牌原样放在 Authorization 里，响应裹着 {code, data, msg}。列表里不带规则（和线上一样），规则在详情里。
+    if (pathname.startsWith('/api/v1/comfyui/')) {
+      const envelope = (data) => ({ code: 'Success', msg: 'success', data, request_id: 'mock' });
+      const autodlAuthed = req.headers.authorization === MOCK_AUTODL_TOKEN;
+      if (!autodlAuthed) return json(res, 401, { code: 'Unauthorized', msg: 'invalid token', data: null });
+      if (req.method === 'POST' && pathname === '/api/v1/comfyui/workflows') {
+        const { page_index = 1 } = JSON.parse(body.toString('utf8') || '{}');
+        // 每页只给一条，好让分页也走到。
+        const list = page_index === 1 ? AUTODL_WORKFLOWS.map(({ input_rules, input_example, output_example, ...rest }) => rest) : [];
+        return json(res, 200, envelope({ list, result_total: AUTODL_WORKFLOWS.length }));
+      }
+      const detail = /^\/api\/v1\/comfyui\/workflows\/([\w.-]+)$/.exec(pathname);
+      if (req.method === 'GET' && detail) {
+        const workflow = AUTODL_WORKFLOWS.find((w) => w.uuid === detail[1]);
+        if (!workflow) return json(res, 404, { code: 'NotFound', msg: 'workflow not found', data: null });
+        return json(res, 200, envelope(workflow));
+      }
+      const submit = /^\/api\/v1\/comfyui\/comfyui_workflow\/([\w.-]+)$/.exec(pathname);
+      if (req.method === 'POST' && submit) {
+        if (!AUTODL_WORKFLOWS.some((w) => w.uuid === submit[1])) return json(res, 404, { code: 'NotFound', msg: 'workflow not found', data: null });
+        const inputs = JSON.parse(body.toString('utf8') || '{}');
+        const id = `autodl-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+        autodlTasks.set(id, { id, uuid: submit[1], inputs, start: Date.now(), fail: /FAIL/.test(JSON.stringify(inputs)) });
+        return json(res, 200, envelope({ task_id: id, status: 'QUEUED' }));
+      }
+      const query = /^\/api\/v1\/comfyui\/comfyui_workflow\/result\/([\w-]+)$/.exec(pathname);
+      if (req.method === 'GET' && query) {
+        const task = autodlTasks.get(query[1]);
+        if (!task) return json(res, 200, { code: 'NotFound', msg: 'task not found', data: null });
+        const age = (Date.now() - task.start) / 1000;
+        if (task.fail) return json(res, 200, envelope({ status: 'FAILED', error: { message: 'Workflow node failed' } }));
+        if (age < taskSeconds) return json(res, 200, envelope({ status: 'RUNNING' }));
+        // 一次给两份结果：视频的工作流出两个文件，音频的出一个 wav。
+        if (task.uuid === 'indextts_demo') return json(res, 200, envelope({ status: 'SUCCESS', duration: 3, cost: 3, results: [{ url: `${base}/autodl-files/${task.id}.wav`, type: 'audio', file_type: 'wav', duration: 3 }] }));
+        return json(res, 200, envelope({ status: 'SUCCESS', duration: 5, cost: 50, results: [{ url: `${base}/autodl-files/${task.id}.mp4`, type: 'video', file_type: 'mp4', duration: 5 }] }));
+      }
+      return json(res, 404, { code: 'NotFound', msg: `no route ${req.method} ${pathname}`, data: null });
+    }
+
     if (!authed) return fail(res, 401, 'AuthenticationError', 'the API key or AK/SK in the request is missing or invalid.');
 
     if (req.method === 'GET' && pathname === '/contents/generations/tasks') return json(res, 200, { items: [], total: 0 });
@@ -185,7 +285,7 @@ export function startMock({ port = 0, taskSeconds = 14, sampleFile = '', imageFi
 
   return new Promise((resolve) => {
     server.listen(port, '127.0.0.1', () => {
-      resolve({ port: server.address().port, url: `http://127.0.0.1:${server.address().port}`, log, tasks, files, close: () => new Promise((done) => server.close(done)) });
+      resolve({ port: server.address().port, url: `http://127.0.0.1:${server.address().port}`, log, tasks, autodlTasks, files, close: () => new Promise((done) => server.close(done)) });
     });
   });
 }

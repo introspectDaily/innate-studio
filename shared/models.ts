@@ -2,6 +2,8 @@
 // 页面（web/）和本地服务（server.js）都读它，加新模型、改某个模型的规则只改这里。
 // 里面只有数据和不碰页面、不碰网络的小函数。
 
+import { workflowCost as autodlWorkflowCost } from './autodl.ts';
+
 export type VideoMode = 'text' | 'frames' | 'reference';
 
 // ---------- 平台 ----------
@@ -195,8 +197,10 @@ const DOUBAO_SPEECH_PRICE = 3;
 const DOUBAO_AUDIO_PRICE = 1;
 
 // 一条记录大约花了多少元。算不出来（以前别的平台留下的记录、没有用量、价目表里没有）就是 null。
-export function estimateCost(item: { model?: string; kind?: string; tool?: string; usage?: Record<string, any> | null; payload?: Record<string, any> | null }): number | null {
+// opts.seconds 是平台给的实际时长；AutoDL 的工作流按任务定价（见 shared/autodl.ts），记在记录自己的 payload 快照里。
+export function estimateCost(item: { model?: string; kind?: string; tool?: string; usage?: Record<string, any> | null; payload?: Record<string, any> | null; provider?: string; workflow?: Record<string, any> | null }, opts: { seconds?: number } = {}): number | null {
   const usage = item.usage;
+  if (item.provider === 'autodl') return autodlCost(item, opts);
   if (!usage) return null;
   if (item.tool === 'sfx' || item.tool === 'music') return item.model === AUDIO_MODEL && usage.audio_seconds > 0 ? (usage.audio_seconds / 60) * DOUBAO_AUDIO_PRICE : null;
   if (item.tool === 'speech') return item.model === SPEECH_MODEL && usage.text_words > 0 ? (usage.text_words / 10000) * DOUBAO_SPEECH_PRICE : null;
@@ -221,6 +225,23 @@ export function estimateCost(item: { model?: string; kind?: string; tool?: strin
   return (usage.completion_tokens / 1e6) * tier[hasVideo ? 1 : 0];
 }
 
+// AutoDL 的工作流按平台给的算：提交时把当时的工作流定义（计费配置、input_rules 里填的值）存一份快照在记录里，
+// 之后不管平台调价还是下架，这条记录都按当时的价算。按秒计费的用平台返回的时长，拿不到就用提交时的时长。
+function autodlCost(item: { payload?: Record<string, any> | null; workflow?: Record<string, any> | null }, opts: { seconds?: number }): number | null {
+  // 记录里的快照把计费配置放在 billing 里（上面还记着工作流的名字、类型、提交的参数），计价函数要看的是顶层。
+  const snapshot = item.workflow;
+  if (!snapshot?.billing) return null;
+  const { price_type, billing_config, price } = snapshot.billing;
+  return autodlWorkflowCost({ price_type, billing_config, price }, item.payload || {}, opts.seconds || 0);
+}
+
+// 提交之前估这一条要花多少元，用来预扣积分；生成完再按 estimateCost 的实际用量结算。item 的形状和生成记录一样。估不出来是 null。
+// AutoDL 的记录带 provider: 'autodl'，走工作流快照自己的计费；其余平台走下面 baseQuoteCost 的价目表。
+export function quoteCost(item: { model?: string; kind?: string; tool?: string; prompt?: string; payload?: Record<string, any> | null; provider?: string; workflow?: Record<string, any> | null }, opts?: { seconds?: number }): number | null {
+  if (item.provider === 'autodl') return autodlCost(item, opts || {});
+  return baseQuoteCost(item);
+}
+
 // ---------- 积分 ----------
 // 多人模式下成员看到的、花的都是积分：1 积分 = 0.01 元，按上面的成本 1:1 折算，不加价。
 export const CREDITS_PER_YUAN = 100;
@@ -243,7 +264,8 @@ const AIHUBMIX_REF_USD = 0.01;
 const VIDEO_PIXELS: Record<string, number> = { '480p': 409_920, '720p': 921_600, '1080p': 2_073_600, '4k': 8_294_400 };
 
 // 提交之前估这一条要花多少元，用来预扣积分；生成完再按 estimateCost 的实际用量结算。item 的形状和生成记录一样。估不出来是 null。
-export function quoteCost(item: { model?: string; kind?: string; tool?: string; prompt?: string; payload?: Record<string, any> | null }): number | null {
+// 这里只算火山、MiniMax、AiHubMix；AutoDL 的入口在文件上面。
+function baseQuoteCost(item: { model?: string; kind?: string; tool?: string; prompt?: string; payload?: Record<string, any> | null }): number | null {
   const payload = item.payload || {};
   if (item.tool === 'speech') return (String(item.prompt || '').length / 10000) * DOUBAO_SPEECH_PRICE;
   // 音效没指定时长时由模型自己定，先按 30 秒预扣。

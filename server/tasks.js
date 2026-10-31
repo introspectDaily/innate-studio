@@ -6,11 +6,12 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { ARK, MINIMAX, MEDIA_DIRS, POLL_INTERVAL_MS, MAX_PENDING_MS, DOWNLOAD_RETRY_MS, MAX_DOWNLOAD_ATTEMPTS } from './config.js';
+import { ARK, AUTODL, MINIMAX, MEDIA_DIRS, POLL_INTERVAL_MS, MAX_PENDING_MS, DOWNLOAD_RETRY_MS, MAX_DOWNLOAD_ATTEMPTS } from './config.js';
 import { HttpError } from './http.js';
 import { openSpaces } from './store.js';
-import { apiKey, minimaxKey } from './keys.js';
+import { apiKey, autodlToken, minimaxKey } from './keys.js';
 import { callArk, callMinimax, ERROR_HINTS } from './ark.js';
+import { getResult } from './autodl.js';
 import { makeThumb } from './thumbs.js';
 import { syncCredits } from './credits.js';
 
@@ -24,8 +25,12 @@ const STATUS_ALIASES = {
 export const VIDEO_TASKS_PATH = '/contents/generations/tasks';
 export const MINIMAX_VIDEO_PATH = '/v2/video_generation';
 
-// 视频任务在哪个平台上，就到哪个平台去查。query 返回的东西统一成火山方舟的样子（status、usage、content.video_url），applyTaskState 只认这一种。
+// 视频任务在哪个平台上，就到哪个平台去查。query 返回的东西统一成火山方舟的样子（status、usage、content.video_url、results），applyTaskState 只认这一种。
 // MiniMax 的任务包在 task 里，成片地址叫 content.url；它没有完成时间，记的是查到它完成的那一刻（手动填的余额按这个时刻扣，要精确到毫秒）；任务只能查到 7 天以内的。
+// AutoDL 的状态是大写的 QUEUED / RUNNING / SUCCESS / FAILED，结果在 results 数组里（可能是视频、音频或图片）；
+// 下载结果地址不用带令牌（平台给的是对象存储的地址），只有平台自己域名下才用原样令牌。
+const AUTODL_STATUS = { QUEUED: 'queued', RUNNING: 'running', SUCCESS: 'success', FAILED: 'failed' };
+
 const PLATFORMS = {
   ark: {
     ...ARK,
@@ -39,6 +44,20 @@ const PLATFORMS = {
       const task = (await callMinimax('GET', `/v2/query/video_generation/${encodeURIComponent(id)}`, { timeoutMs: 20000 })).data?.task;
       if (!task) return null;
       return { ...task, content: { video_url: task.content?.url } };
+    },
+  },
+  autodl: {
+    ...AUTODL,
+    key: autodlToken,
+    // 令牌原样放进 Authorization，不加 Bearer（和火山、MiniMax 不一样）。
+    authScheme: 'raw',
+    query: async (id) => {
+      const { status, results, data } = await getResult(id);
+      if (status === 'FAILED') {
+        const e = data?.error;
+        return { status: AUTODL_STATUS.FAILED, error: (typeof e === 'string' ? e : e?.message) || data?.message || data?.msg || '任务执行失败' };
+      }
+      return { status: AUTODL_STATUS[status], ...(results.length ? { results } : {}) };
     },
   },
 };
@@ -56,12 +75,17 @@ export function newItem(fields) {
 
 export function applyTaskState(item, data) {
   if (!data) return;
+  // 认得的状态，或者一组结果文件（AutoDL 成功时只有 results）。两样都没有就什么都不改。
+  if (!STATUS_ALIASES[String(data.status || '').toLowerCase()] && !Array.isArray(data.results)) return;
   const status = STATUS_ALIASES[String(data.status || '').toLowerCase()];
   if (status) item.status = status;
   if (typeof data.progress === 'number') item.progress = data.progress;
   if (data.usage) item.usage = data.usage;
   if (data.completed_at) item.completedAt = data.completed_at * 1000;
   if (data.content?.video_url) item.remoteUrl = data.content.video_url;
+  // AutoDL 的结果是一组文件，按顺序记下来，第一份当主文件（卡片、播放器用它），其余在详情里也能下载。
+  if (Array.isArray(data.results) && data.results.length) item.results = data.results.filter((result) => result?.url);
+  if (item.results?.length && !item.remoteUrl) item.remoteUrl = item.results[0].url;
   if (item.status === 'completed') {
     item.progress = 100;
     item.error = null;
@@ -73,7 +97,7 @@ export function applyTaskState(item, data) {
     const code = (typeof e === 'object' && e?.code) || '';
     // 平台给的失败原因是英文的：卡片上显示中文的原因，原话留在 detail 里。
     const known = ERROR_HINTS[code] || (/audit|sensitive|moderation|censor/i.test(raw) ? '内容未通过审核，请修改提示词或参考素材后重试' : '');
-    item.error = { message: known || '视频生成失败，请稍后重试', code, ...(raw && { detail: `${PLATFORMS[item.provider]?.label || '平台'}${code ? `（${code}）` : ''}：${raw}` }) };
+    item.error = { message: known || '生成失败，请稍后重试', code, ...(raw && { detail: `${PLATFORMS[item.provider]?.label || '平台'}${code ? `（${code}）` : ''}：${raw}` }) };
   }
 }
 
@@ -101,49 +125,104 @@ export async function pollTask(space, item) {
       item.error = { message: '查询超时，请稍后重新查询。', code: 'poll_timeout' };
     }
     polling.delete(item.id);
-    syncCredits(space, item);
+    // AutoDL 的结果里有平台给的时长，按秒计费时拿它对账。
+    syncCredits(space, item, { seconds: Number(item.results?.[0]?.duration) || 0 });
     space.save('history');
   }
   if (item.status === 'completed') downloadResult(space, item);
 }
 
-// 任务完成后把结果存到本机，历史记录不依赖远端地址是否还有效。
+// 存到本机用的扩展名。平台给了 file_type（mp4、wav…）就用它；没给就按记录的类型猜。
+const KNOWN_EXTS = new Set(['mp4', 'mov', 'webm', 'jpg', 'jpeg', 'png', 'webp', 'mp3', 'wav']);
+function resultExt(item) {
+  const given = String(item.results?.[0]?.file_type || '').toLowerCase().replace(/^\./, '');
+  if (KNOWN_EXTS.has(given)) return given;
+  if (item.kind === 'audio') return 'mp3';
+  if (item.kind === 'image') return 'png';
+  return 'mp4';
+}
+
+// 下载的结果不是音频、视频、图片时（多半是一段错误说明）不算下载成功。
+const DOWNLOAD_REJECT = /^(application\/json|text\/)/i;
+
+// 下载一个结果地址到 tmp。只有平台自己的域名下才带上令牌，避免把令牌发给别的主机。
+async function fetchInto(url, tmp, platform) {
+  const target = new URL(url, platform.baseUrl);
+  const headers = {};
+  if (target.origin === new URL(platform.baseUrl).origin && platform.key()) {
+    headers.Authorization = platform.authScheme === 'raw' ? platform.key() : `Bearer ${platform.key()}`;
+  }
+  const res = await fetch(target, { headers, signal: AbortSignal.timeout(10 * 60 * 1000) });
+  if (!res.ok || !res.body) throw new Error(`下载返回 ${res.status}`);
+  const type = res.headers.get('content-type') || '';
+  if (DOWNLOAD_REJECT.test(type)) throw new Error(`下载的文件不是媒体（${type}）`);
+  await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(tmp));
+  const { size } = fs.statSync(tmp);
+  if (!size) throw new Error('下载的文件为空');
+  return size;
+}
+
+// 任务完成后把结果存到本机，历史记录不依赖远端地址是否还有效（AutoDL 的文档也写明结果地址很快过期）。
+// 平台给了一组结果（AutoDL）就逐个存：第一份是主文件，记在 item.localFile 里；多给的几份放在 item.extraFiles，删记录时一起删。
 export async function downloadResult(space, item) {
   if (!item.remoteUrl || item.localFile || downloading.has(item.id)) return;
   if ((item.downloadAttempts || 0) >= MAX_DOWNLOAD_ATTEMPTS) return;
+  const platform = PLATFORMS[item.provider] || PLATFORMS.ark;
   downloading.add(item.id);
   item.downloadAttempts = (item.downloadAttempts || 0) + 1;
   item.lastDownloadAt = Date.now();
-
-  const audio = item.kind === 'audio';
-  const file = `${item.id.replace(/[^\w.-]/g, '_')}.${audio ? 'mp3' : 'mp4'}`;
-  const dir = space.resultDir(item);
-  const tmp = path.join(dir, `${file}.part`);
   try {
-    const platform = PLATFORMS[item.provider] || PLATFORMS.ark;
-    const url = new URL(item.remoteUrl, platform.baseUrl);
-    const headers = {};
-    // 只在平台自己的域名下才带上 Key，避免把 Key 发给别的主机。
-    if (url.origin === new URL(platform.baseUrl).origin && platform.key()) headers.Authorization = `Bearer ${platform.key()}`;
-    const res = await fetch(url, { headers, signal: AbortSignal.timeout(10 * 60 * 1000) });
-    if (!res.ok || !res.body) throw new Error(`下载返回 ${res.status}`);
-    const type = res.headers.get('content-type') || '';
-    if (/^(application\/json|text\/)/i.test(type)) throw new Error(`下载的文件不是${audio ? '音频' : '视频'}（${type}）`);
-    await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(tmp));
-    const { size } = fs.statSync(tmp);
-    if (!size) throw new Error('下载的文件为空');
-    fs.renameSync(tmp, path.join(dir, file));
-    item.localFile = file;
-    item.fileSize = size;
-    item.downloadError = null;
-    makeThumb(space, item);
+    const results = (item.results || []).filter((result) => result?.url);
+    if (results.length) await saveResults(space, item, platform, results);
+    else await saveSingle(space, item, platform);
   } catch (err) {
     item.downloadError = err.message;
-    fs.rmSync(tmp, { force: true });
   } finally {
     downloading.delete(item.id);
     space.save('history');
   }
+}
+
+async function saveSingle(space, item, platform) {
+  const file = `${item.id.replace(/[^\w.-]/g, '_')}.${resultExt(item)}`;
+  const dir = space.resultDir(item);
+  const tmp = path.join(dir, `${file}.part`);
+  try {
+    const size = await fetchInto(item.remoteUrl, tmp, platform);
+    fs.renameSync(tmp, path.join(dir, file));
+    Object.assign(item, { localFile: file, fileSize: size, downloadError: null });
+    makeThumb(space, item);
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
+  }
+}
+
+async function saveResults(space, item, platform, results) {
+  // 按结果类型定这条记录是哪一种，文件存进对应的目录（以后不会再变）。
+  const type = results[0]?.type;
+  if (type === 'image' || type === 'video' || type === 'audio') item.kind = type;
+  const dir = space.resultDir(item);
+  const base = item.id.replace(/[^\w.-]/g, '_');
+  const saved = [];
+  let failure = '';
+  for (const [index, result] of results.entries()) {
+    const ext = resultExt({ ...item, results: [result] });
+    const file = `${base}${index ? `_${index + 1}` : ''}.${ext}`;
+    const tmp = path.join(dir, `${file}.part`);
+    try {
+      const size = await fetchInto(result.url, tmp, platform);
+      fs.renameSync(tmp, path.join(dir, file));
+      saved.push({ file, size });
+    } catch (err) {
+      fs.rmSync(tmp, { force: true });
+      failure = err.message;
+    }
+  }
+  if (!saved.length) throw new Error(failure || '没有下载到结果文件');
+  const [first, ...rest] = saved;
+  Object.assign(item, { localFile: first.file, fileSize: first.size, extraFiles: rest, downloadError: saved.length < results.length ? failure || '部分文件下载失败' : null });
+  makeThumb(space, item);
 }
 
 function tick() {

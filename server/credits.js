@@ -57,9 +57,9 @@ export function grantCredits(user, amount, by) {
 
 // 提交之前预扣。items 是这次要建的记录（一次出几张图就是几条），预扣了多少记在每条的 credits 里。
 // 余额不够就不让提交；管理员不拦，但照样记账。
-export function holdCredits(user, items) {
+export function holdCredits(user, items, opts) {
   if (!user) return;
-  const quotes = items.map((item) => toCredits(quoteCost(item) || 0));
+  const quotes = items.map((item) => toCredits(quoteCost(item, opts) || 0));
   const total = quotes.reduce((sum, n) => sum + n, 0);
   const balance = balanceOf(user.id);
   if (user.role !== 'admin' && balance < total) throw new HttpError(402, 'insufficient_credits', `积分不足：本次需要 ${total}，剩余 ${balance}`);
@@ -71,10 +71,11 @@ export function holdCredits(user, items) {
 
 // 一条记录的状态变了之后对一次账：还在跑的不动，完成了的按实际用量收（算不出来就按预扣的），失败了的全退。
 // 可以反复调：查询超时退掉的，之后又查到完成了，会再扣回来。调用的地方负责把记录存盘。
-export function syncCredits(space, item) {
+// opts.seconds 是平台返回的实际时长（AutoDL 按秒计费时用）；给了 opts.fixedYuan 就按这个固定价收（平台按任务定价，和时长无关）。
+export function syncCredits(space, item, opts = {}) {
   if (!space.userId || !item.credits) return;
   if (item.status !== 'completed' && item.status !== 'failed') return;
-  const cost = item.status === 'completed' ? estimateCost(item) : 0;
+  const cost = item.status === 'completed' ? (opts.fixedYuan ?? estimateCost(item, opts)) : 0;
   const target = cost == null ? item.credits.quote : toCredits(cost);
   const delta = item.credits.charged - target;
   if (!delta) return;

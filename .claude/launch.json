@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "mock",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["test/run-with-mock.js"],
+      "port": 5179
+    },
+    {
+      "name": "live",
+      "runtimeExecutable": "/tmp/start-live.sh",
+      "runtimeArgs": [],
+      "port": 5188
+    }
+  ]
+}

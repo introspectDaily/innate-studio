@@ -119,7 +119,11 @@ route('DELETE', /^\/api\/history\/([^/]+)$/, async ({ params, space }) => {
   const index = space.history.findIndex((h) => h.id === params[0]);
   if (index === -1) throw new HttpError(404, 'not_found', '记录不存在');
   const [item] = space.history.splice(index, 1);
-  if (item.localFile) fs.rmSync(path.join(space.resultDir(item), path.basename(item.localFile)), { force: true });
+  // 一份记录可能有一组结果文件（AutoDL 的工作流会出好几个），主文件和其余的都要删。
+  const dir = space.resultDir(item);
+  for (const file of [item.localFile, ...(item.extraFiles || []).map((entry) => entry?.file)]) {
+    if (file) fs.rmSync(path.join(dir, path.basename(file)), { force: true });
+  }
   removeThumb(space, item);
   space.save('history');
   return null;

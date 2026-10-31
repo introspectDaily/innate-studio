@@ -9,7 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { estimateCost } from '../shared/models.ts';
-import { startMock, MOCK_ARK_KEY, MOCK_AIHUBMIX_KEY, MOCK_AIHUBMIX_MANAGE_KEY, MOCK_MINIMAX_KEY, MOCK_SPEECH_KEY, MOCK_ACCESS_KEY } from './mock-ark.js';
+import { startMock, MOCK_ARK_KEY, MOCK_AIHUBMIX_KEY, MOCK_AIHUBMIX_MANAGE_KEY, MOCK_MINIMAX_KEY, MOCK_SPEECH_KEY, MOCK_ACCESS_KEY, MOCK_AUTODL_TOKEN } from './mock-ark.js';
 import { startTosMock, MOCK_TOS_ACCESS_KEY_ID, MOCK_TOS_SECRET_ACCESS_KEY, MOCK_TOS_BUCKET } from './mock-tos.js';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -101,7 +101,7 @@ before(async () => {
     cwd: root,
     stdio: 'ignore',
     // Key 的环境变量都置空：即使本机设置了真实 Key，测试也绝不会用到它。
-    env: { ...process.env, PORT: String(port), ARK_BASE_URL: mock.url, DOUBAO_SPEECH_BASE_URL: mock.url, VOLC_BILLING_BASE_URL: mock.url, MINIMAX_BASE_URL: mock.url, MINIMAX_CN_API_KEY: '', AIHUBMIX_BASE_URL: mock.url, AIHUBMIX_API_KEY: '', AIHUBMIX_MANAGE_KEY: '', ARK_API_KEY: '', DOUBAO_SPEECH_API_KEY: '', VOLC_ACCESS_KEY_ID: '', VOLC_SECRET_ACCESS_KEY: '', TOS_ACCESS_KEY_ID: MOCK_TOS_ACCESS_KEY_ID, TOS_SECRET_ACCESS_KEY: MOCK_TOS_SECRET_ACCESS_KEY, TOS_FORCE_PATH_STYLE: '1', INNATE_DATA_DIR: dataDir, INNATE_PENDING_LIMIT_MS: '1500' },
+    env: { ...process.env, PORT: String(port), ARK_BASE_URL: mock.url, DOUBAO_SPEECH_BASE_URL: mock.url, VOLC_BILLING_BASE_URL: mock.url, MINIMAX_BASE_URL: mock.url, MINIMAX_CN_API_KEY: '', AIHUBMIX_BASE_URL: mock.url, AIHUBMIX_API_KEY: '', AIHUBMIX_MANAGE_KEY: '', AUTODL_BASE_URL: mock.url, AUTODL_ART_API_KEY: '', AUTODL_TOKEN: '', ARK_API_KEY: '', DOUBAO_SPEECH_API_KEY: '', VOLC_ACCESS_KEY_ID: '', VOLC_SECRET_ACCESS_KEY: '', TOS_ACCESS_KEY_ID: MOCK_TOS_ACCESS_KEY_ID, TOS_SECRET_ACCESS_KEY: MOCK_TOS_SECRET_ACCESS_KEY, TOS_FORCE_PATH_STYLE: '1', INNATE_DATA_DIR: dataDir, INNATE_PENDING_LIMIT_MS: '1500' },
   });
   await waitFor(async () => (await fetch(`${base}/api/state`)).ok, '服务启动');
 });
@@ -949,4 +949,86 @@ test('技能：官方的只读，自己建的能改能删，扩写时把规则�
 
   assert.equal((await call('DELETE', `/api/skills/${id}`)).status, 204);
   assert.equal((await call('GET', '/api/skills')).data.items.length, official.length);
+});
+
+test('AutoDL 工作流：目录和规则、提交前校验、参数换成 data URL 发出去、完成后一组结果存到本机、费用按工作流的计费配置', async () => {
+  // 没配令牌：目录说没开通，提交被拒。
+  assert.equal((await call('GET', '/api/autodl/workflows')).data.hasKey, false);
+  const noKey = await call('POST', '/api/autodl/submit', { workflow: 'minimax_h3_demo', inputs: {} });
+  assert.equal(noKey.status, 503);
+
+  const saved = (await call('PUT', '/api/key', { apiKey: MOCK_AUTODL_TOKEN, service: 'autodl' })).data;
+  assert.equal(saved.autodl.hasKey, true);
+  assert.equal(JSON.stringify(saved).includes(MOCK_AUTODL_TOKEN), false);
+
+  // 目录：列表接口不带规则（和线上一样），但有起价、用量和必填的素材类型。
+  const catalog = await call('GET', '/api/autodl/workflows');
+  assert.equal(catalog.status, 200);
+  assert.equal(catalog.data.hasKey, true);
+  assert.equal(catalog.data.total, 2);
+  const [first, second] = catalog.data.items;
+  assert.deepEqual(catalog.data.items.map((item) => item.uuid), ['indextts_demo', 'minimax_h3_demo'], '按最近一周的用量排');
+  assert.equal(first.media.includes('audio'), true);
+  assert.equal(second.fromCredits, 60);
+  assert.equal(second.media.includes('image'), true);
+
+  // 详情：规则、计费配置都在这一份里。
+  const detail = await call('GET', '/api/autodl/workflows/minimax_h3_demo');
+  assert.equal(detail.status, 200);
+  assert.equal(detail.data.workflow.input_rules.ref_image_0.type, 'image');
+  assert.equal(detail.data.workflow.billing_config.minimax_h3.length, 2);
+  assert.equal((await call('GET', '/api/autodl/workflows/nope')).status, 404);
+
+  // 校验不过：缺提示词、不认识的参数。
+  const { url } = (await upload()).data;
+  const invalid = await call('POST', '/api/autodl/submit', { workflow: 'minimax_h3_demo', inputs: { ref_image_0: url } });
+  assert.equal(invalid.status, 400);
+  assert.match(invalid.data.error.message, /请填写提示词/);
+  assert.equal((await call('POST', '/api/autodl/submit', { workflow: 'minimax_h3_demo', inputs: { prompt: '猫', ref_image_0: url, bogus: 1 } })).status, 400);
+
+  // 提交：本机的参考图换成 data URL；默认值补上；请求体就是这组参数。
+  const mark = mock.log.length;
+  const created = await call('POST', '/api/autodl/submit', { workflow: 'minimax_h3_demo', inputs: { prompt: '一只猫', ref_image_0: url, resolution: '480p横' }, form: { type: 'flow', refs: { ref_image_0: { url, kind: 'image' } } } });
+  assert.equal(created.status, 200, JSON.stringify(created.data));
+  assert.equal(created.data.provider, 'autodl');
+  assert.equal(created.data.kind, 'video');
+  assert.equal(created.data.model, 'MiniMax H3 示例');
+  const bodies = sent('/api/v1/comfyui/comfyui_workflow/minimax_h3_demo', mark);
+  const body = bodies.at(-1);
+  assert.equal(body.prompt, '一只猫');
+  assert.equal(body.duration, 5);
+  assert.equal(body.mode, '高质模式');
+  assert.equal(body.resolution, '480p横');
+  assert.match(body.ref_image_0, /^data:image\/png;base64,/);
+  assert.equal('ref_image_1' in body, false);
+
+  // 完成：结果地址在对象存储上，下载不用令牌；存到本机，记录上留着平台的这组结果和当时的工作流快照。
+  const done = await waitItem(created.data.id, (i) => i.status === 'completed' && i.savedLocally, 'AutoDL 任务完成并存到本机');
+  assert.match(done.mediaUrl, /^\/media\/videos\//);
+  assert.equal(done.results.length, 1);
+  assert.equal(done.results[0].duration, 5);
+  assert.equal(done.workflow.billing.price_type, 'minimax_h3');
+  assert.equal(done.workflow.inputs.prompt, '一只猫');
+  assert.equal(estimateCost(done), 0.5);
+  const downloads = mock.log.slice(mark).filter((entry) => entry.pathname.startsWith('/autodl-files/'));
+  assert.ok(downloads.length > 0);
+  assert.ok(downloads.every((entry) => !entry.authed), '对象存储上的结果地址不带令牌');
+
+  // 音频的工作流：结果存到 audio 目录，费用按秒和最低价结算。
+  const audio = await call('POST', '/api/autodl/submit', { workflow: 'indextts_demo', inputs: { prompt_text: '你好，这是一个测试', prompt_simple: 'data:audio/wav;base64,AAAA' } });
+  assert.equal(audio.status, 200, JSON.stringify(audio.data));
+  assert.equal(audio.data.kind, 'audio');
+  const audioDone = await waitItem(audio.data.id, (i) => i.status === 'completed' && i.savedLocally, '声纹克隆完成并存到本机');
+  assert.match(audioDone.mediaUrl, /^\/media\/audio\/.+\.wav$/);
+  assert.equal(estimateCost(audioDone, { seconds: 3 }), 0.1, '最低价 0.1 元');
+
+  // 失败：按平台给的原因写进记录。
+  const failed = await call('POST', '/api/autodl/submit', { workflow: 'minimax_h3_demo', inputs: { prompt: 'FAIL', ref_image_0: url } });
+  const failedItem = await refreshUntil(failed.data.id, (i) => i.status === 'failed', 'AutoDL 任务失败');
+  assert.match(failedItem.error.detail, /Workflow node failed/);
+
+  // 令牌回显只给头尾。
+  assert.match((await call('GET', '/api/state')).data.autodl.keyHint, /^mock-a…\d{4}$/);
+  await call('DELETE', '/api/key?service=autodl');
+  assert.equal((await call('GET', '/api/autodl/workflows')).data.hasKey, false);
 });
