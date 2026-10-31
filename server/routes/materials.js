@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { HttpError, readJsonBody, route } from '../http.js';
+import { mediaInfo, recordInfo } from '../media.js';
 import { publicationsFor, publishLocalMedia } from '../publishing.js';
 import { tosConfigView } from '../tos.js';
 
@@ -67,6 +68,19 @@ route('DELETE', /^\/api\/materials\/([\w-]+)$/, async ({ space, params }) => {
   space.save('materials');
   space.save('publications');
   return null;
+});
+
+// 给 agent 用的一个总入口：把一个记录 id 或 /media/... 地址换成「文件在哪」。
+// 本机有文件就给绝对路径（agent 直接读，不用下载），没有就给能取的链接——两边都不假装成功。
+route('GET', /^\/api\/media$/, async ({ query, space }) => {
+  const recordId = String(query.get('record') || '').trim();
+  const url = String(query.get('url') || '').trim();
+  if (!recordId && !url) throw new HttpError(400, 'invalid_request', '要带 ?record=<记录id> 或 ?url=/media/...');
+  if (recordId) return { record: recordId, ...recordInfo(space, recordId) };
+  if (/^https?:\/\//i.test(url)) return { url, localPath: null, exists: false, remote: true, note: '公网链接，本机没有对应文件' };
+  const info = mediaInfo(space, url);
+  const kind = KIND_BY_EXT[path.extname(url.split('?')[0]).toLowerCase()] || null;
+  return { ...info, kind, name: path.basename(url.split('?')[0]) || null, contentType: MIME_BY_EXT[path.extname(url.split('?')[0]).toLowerCase()] || null };
 });
 
 route('POST', /^\/api\/materials\/publish$/, async ({ req, space }) => {

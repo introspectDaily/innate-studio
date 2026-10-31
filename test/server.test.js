@@ -927,6 +927,125 @@ test('画布：单个节点按字段合并，改提示词不动历史版本', as
   await call('DELETE', `/api/canvases/${id}`);
 });
 
+test('画布：节点输入给本机路径，缺文件的、丢的连线都标出来', async () => {
+  const created = await call('POST', '/api/canvases', { name: '节点输入' });
+  const { id } = created.data;
+  // 上传一张真图当首帧；再生成一张当「参考图」那条的来源记录。
+  const shot = await upload(PNG, 'image/png');
+  const made = await call('POST', '/api/images', { payload: { model: IMAGE, prompt: '一只猫', n: 1 } });
+  const image = await waitItem(made.data.items[0].id, (item) => item.status === 'completed', '图片生成完成');
+
+  const nodes = [
+    { id: 'txt', type: 'text', position: { x: 0, y: 0 }, data: { no: 1, text: '镜头缓慢推进' } },
+    { id: 'img', type: 'image', position: { x: 0, y: 200 }, data: { no: 1, upload: { url: shot.data.url, name: '首帧.png' } } },
+    { id: 'rec', type: 'image', position: { x: 300, y: 200 }, data: { no: 2, recordId: image.id } },
+    { id: 'empty', type: 'image', position: { x: 600, y: 200 }, data: { no: 3, prompt: '还没生成' } },
+    { id: 'gone', type: 'image', position: { x: 900, y: 200 }, data: { no: 4, upload: { url: '/media/uploads/up_none.png', name: '删掉了.png' } } },
+    { id: 'vid', type: 'video', position: { x: 0, y: 400 }, data: { no: 1, prompt: '按首帧动起来', model: VIDEO } },
+  ];
+  const edges = [
+    { id: 'e1', source: 'txt', target: 'vid', type: 'link', data: { kind: 'text' } },
+    { id: 'e2', source: 'img', target: 'vid', type: 'link', data: { kind: 'image', role: 'first' } },
+    { id: 'e3', source: 'rec', target: 'vid', type: 'link', data: { kind: 'image', role: 'reference' } },
+    { id: 'e4', source: 'empty', target: 'vid', type: 'link', data: { kind: 'image', role: 'reference' } },
+    { id: 'e5', source: 'gone', target: 'vid', type: 'link', data: { kind: 'image', role: 'last' } },
+    { id: 'e6', source: 'ghost', target: 'vid', type: 'link', data: { kind: 'image' } },
+  ];
+  await call('PUT', `/api/canvases/${id}`, { nodes, edges });
+
+  const got = await call('GET', `/api/canvases/${id}/nodes/vid/inputs`);
+  assert.equal(got.status, 200);
+  assert.equal(got.data.node.id, 'vid');
+  assert.equal(got.data.node.model, VIDEO);
+  // 这个节点自己还没有内容（没生成），所以没有可给的文件。
+  assert.equal(got.data.content, null);
+  assert.equal(got.data.inputs.length, 6);
+
+  const byFrom = Object.fromEntries(got.data.inputs.map((item) => [item.from, item]));
+
+  // 上游文本：内容直接给，并说明它会被拼到提示词前面。
+  assert.equal(byFrom.txt.role, 'text');
+  assert.equal(byFrom.txt.text, '镜头缓慢推进');
+  assert.match(byFrom.txt.note, /拼在提示词前面/);
+
+  // 上传来的首帧：本机绝对路径 + 大小，agent 直接读这个文件就能看。
+  assert.equal(byFrom.img.role, 'first');
+  assert.equal(byFrom.img.roleLabel, '首帧');
+  assert.equal(byFrom.img.via, 'upload');
+  assert.equal(byFrom.img.localPath, path.join(dataDir, 'uploads', path.basename(shot.data.url)));
+  assert.equal(byFrom.img.bytes, PNG.length);
+  assert.equal(byFrom.img.ready, true);
+
+  // 生成记录来的参考图：recordId 换成结果文件的本机路径。
+  assert.equal(byFrom.rec.role, 'reference');
+  assert.equal(byFrom.rec.via, 'record');
+  assert.equal(byFrom.rec.recordId, image.id);
+  assert.equal(byFrom.rec.localPath, path.join(dataDir, 'images', image.localFile));
+  assert.ok(fs.existsSync(byFrom.rec.localPath));
+
+  // 还没生成的节点：没有路径，标成这次用不上。
+  assert.equal(byFrom.empty.ready, false);
+  assert.equal(byFrom.empty.localPath, null);
+  assert.match(byFrom.empty.note, /还没有内容/);
+
+  // 文件被删掉的：地址还在，但不给一个不存在的路径。
+  assert.equal(byFrom.gone.ready, false);
+  assert.equal(byFrom.gone.exists, false);
+  assert.equal(byFrom.gone.localPath, null);
+
+  // 连线指向的节点已经不在画布上：如实列出来。
+  assert.equal(byFrom.ghost.roleLabel, '已丢失');
+  assert.equal(byFrom.ghost.ready, false);
+
+  // 节点自己已有内容又没连进图片时，自己那张图会当底图——单独一条，标成「自身」。
+  const imageInputs = await call('GET', `/api/canvases/${id}/nodes/empty/inputs`);
+  assert.equal(imageInputs.data.inputs.length, 0, '没有内容的节点没有底图可给');
+  const selfRef = await call('GET', `/api/canvases/${id}/nodes/img/inputs`);
+  assert.equal(selfRef.data.inputs.length, 1);
+  assert.equal(selfRef.data.inputs[0].role, 'self');
+  assert.equal(selfRef.data.inputs[0].from, 'img');
+  assert.equal(selfRef.data.inputs[0].localPath, path.join(dataDir, 'uploads', path.basename(shot.data.url)));
+  // 记录来的那张也一样，路径指向生成结果。
+  assert.equal((await call('GET', `/api/canvases/${id}/nodes/rec/inputs`)).data.inputs[0].localPath, path.join(dataDir, 'images', image.localFile));
+  // ignoreSelfRef 关掉底图以后就不算了。
+  await call('PATCH', `/api/canvases/${id}/nodes/img`, { data: { ignoreSelfRef: true } });
+  assert.equal((await call('GET', `/api/canvases/${id}/nodes/img/inputs`)).data.inputs.length, 0);
+
+  assert.equal((await call('GET', `/api/canvases/${id}/nodes/n404/inputs`)).status, 404);
+  await call('DELETE', `/api/canvases/${id}`);
+});
+
+test('媒体：记录 id 和 /media 地址都换成能打开的本机路径', async () => {
+  const shot = await upload(PNG, 'image/png');
+  const local = await call('GET', `/api/media?url=${encodeURIComponent(shot.data.url)}`);
+  assert.equal(local.status, 200);
+  assert.equal(local.data.localPath, path.join(dataDir, 'uploads', path.basename(shot.data.url)));
+  assert.equal(local.data.exists, true);
+  assert.equal(local.data.kind, 'image');
+  assert.equal(local.data.bytes, PNG.length);
+
+  // 生成记录：结果文件在本机，给绝对路径和可下载的地址。
+  const made = await call('POST', '/api/images', { payload: { model: IMAGE, prompt: '一只猫', n: 1 } });
+  const image = await waitItem(made.data.items[0].id, (item) => item.status === 'completed', '图片生成完成');
+  const record = await call('GET', `/api/media?record=${encodeURIComponent(image.id)}`);
+  assert.equal(record.data.localPath, path.join(dataDir, 'images', image.localFile));
+  assert.equal(record.data.mediaUrl, image.mediaUrl);
+  assert.equal(record.data.kind, 'image');
+
+  // 找不到的：说清楚，不给假路径。
+  const missingRecord = await call('GET', '/api/media?record=img_nope');
+  assert.equal(missingRecord.data.localPath, null);
+  assert.match(missingRecord.data.note, /不存在/);
+  const missingFile = await call('GET', '/api/media?url=/media/uploads/up_none.png');
+  assert.equal(missingFile.data.exists, false);
+  assert.equal(missingFile.data.localPath, null);
+  // 公网链接：本机没有文件，只能给链接。
+  const remote = await call('GET', `/api/media?url=${encodeURIComponent('https://example.com/a.png')}`);
+  assert.equal(remote.data.localPath, null);
+  assert.equal(remote.data.remote, true);
+  assert.equal((await call('GET', '/api/media')).status, 400);
+});
+
 test('角色：新建、从生成记录选的图会复制一份、改、删', async () => {
   const shot = await upload(PNG, 'image/png');
   // 生成一张图，拿它当角色的参考图。

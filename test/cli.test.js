@@ -456,3 +456,120 @@ test('history delete: DELETE /api/history/<id>', async () => {
   assert.match(calls[0].u, /\/api\/history\/img1$/);
   assert.ok(r.out.includes('已删除记录: img1'));
 });
+
+// ---------- 节点输入 / 取文件 ----------
+const INPUTS = {
+  canvas: 'cv1',
+  node: { id: 'v1', type: 'video', no: 1, model: 'doubao-seedance-2-5-260628', prompt: '动起来', text: null },
+  content: null,
+  inputs: [
+    { role: 'text', roleLabel: '文本', from: 't1', type: 'text', no: 1, text: '镜头推进', ready: true, note: '会拼在提示词前面' },
+    { role: 'first', roleLabel: '首帧', from: 'i1', type: 'image', no: 1, via: 'upload', localPath: '/abs/uploads/up_1.png', exists: true, bytes: 2048, ready: true },
+  ],
+};
+
+// 三种写法都要打到同一个接口：get <cv> <n> inputs、get inputs <cv> <n>、--inputs。
+async function inputsRun(args) {
+  const calls = [];
+  const r = await runMain(args, async (u, init) => {
+    calls.push({ u, init });
+    return makeRes(200, INPUTS);
+  });
+  return { calls, r };
+}
+
+for (const [label, args] of [
+  ['get <画布> <节点> inputs', ['canvas', 'node', 'get', 'cv1', 'v1', 'inputs']],
+  ['get inputs <画布> <节点>', ['canvas', 'node', 'get', 'inputs', 'cv1', 'v1']],
+  ['--inputs', ['canvas', 'node', 'get', 'cv1', 'v1', '--inputs']],
+]) {
+  test(`canvas node get 的输入视角（${label}）：只读一次 /inputs`, async () => {
+    const { calls, r } = await inputsRun(args);
+    assert.equal(r.code, 0);
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].u, /\/api\/canvases\/cv1\/nodes\/v1\/inputs$/);
+    // 人读的输出里要有路径，这是这个命令存在的理由。
+    assert.ok(r.out.includes('/abs/uploads/up_1.png'), r.out);
+    assert.ok(r.out.includes('首帧'));
+    assert.ok(r.out.includes('镜头推进'));
+  });
+}
+
+test('canvas node get 不带 inputs 时还是读整个节点', async () => {
+  const calls = [];
+  const r = await runMain(['canvas', 'node', 'get', 'cv1', 'v1'], async (u, init) => {
+    calls.push({ u, init });
+    return makeRes(200, { id: 'v1', type: 'video', data: { prompt: '动起来' } });
+  });
+  assert.equal(r.code, 0);
+  assert.match(calls[0].u, /\/api\/canvases\/cv1\/nodes\/v1$/);
+  assert.ok(!calls[0].u.includes('/inputs'));
+});
+
+test('canvas node get ... inputs --json: 原始数据带 role/roleLabel/localPath', async () => {
+  const { r } = await inputsRun(['canvas', 'node', 'get', 'cv1', 'v1', 'inputs', '--json']);
+  const out = JSON.parse(r.out);
+  assert.equal(out.nodeAction, 'inputs');
+  assert.equal(out.inputs.length, 2);
+  assert.equal(out.inputs[1].localPath, '/abs/uploads/up_1.png');
+});
+
+test('media: 记录 id 换成路径，本机有文件就不复制', async () => {
+  const calls = [];
+  const r = await runMain(['media', 'img1'], async (u, init) => {
+    calls.push({ u, init });
+    return makeRes(200, { record: 'img1', kind: 'image', recordId: 'img1', localPath: '/abs/images/img1.jpg', exists: true, bytes: 1024, mediaUrl: '/media/images/img1.jpg' });
+  });
+  assert.equal(r.code, 0);
+  assert.match(calls[0].u, /\/api\/media\?record=img1$/);
+  // 第一行就是路径，脚本里可以直接取。
+  assert.equal(r.out.split('\n')[0], '/abs/images/img1.jpg');
+  assert.ok(r.out.includes('本机原文件'));
+});
+
+test('media: /media 地址也能问，--out 时复制到指定目录', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'innate-media-'));
+  const src = path.join(dir, 'src.png');
+  fs.writeFileSync(src, 'png-bytes');
+  try {
+    const out = path.join(dir, 'out');
+    const calls = [];
+    const r = await runMain(['media', '/media/uploads/up_1.png', '--out', out], async (u, init) => {
+      calls.push({ u, init });
+      return makeRes(200, { url: '/media/uploads/up_1.png', name: 'up_1.png', kind: 'image', localPath: src, exists: true, bytes: 9 });
+    });
+    assert.equal(r.code, 0);
+    assert.match(calls[0].u, /\/api\/media\?url=%2Fmedia%2Fuploads%2Fup_1.png$/);
+    const copied = path.join(out, 'up_1.png');
+    assert.equal(fs.readFileSync(copied, 'utf8'), 'png-bytes');
+    assert.equal(r.out.split('\n')[0], copied);
+    assert.ok(r.out.includes('已复制'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('media: 拿不到文件时报错，不给一个假的路径', async () => {
+  const r = await runMain(['media', 'img_nope'], async () => makeRes(200, { record: 'img_nope', localPath: null, exists: false, note: '生成记录已不存在（可能被删掉了）' }));
+  assert.equal(r.code, 1);
+  assert.ok(r.err.includes('生成记录已不存在'));
+});
+
+test('media: 服务端给的本机路径在别的机器上不存在时，改走下载', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'innate-media-'));
+  try {
+    const fetched = [];
+    const r = await runMain(['media', 'img1', '--out', dir], async (u, init) => {
+      const p = new URL(u);
+      if (p.pathname === '/api/media') return makeRes(200, { recordId: 'img1', kind: 'image', localPath: '/nowhere/on/this/machine/img1.jpg', exists: true, mediaUrl: '/media/images/img1.jpg' });
+      fetched.push(u);
+      return { ok: true, status: 200, statusText: '200', text: async () => '', arrayBuffer: async () => Buffer.from('downloaded') };
+    });
+    assert.equal(r.code, 0);
+    assert.equal(fetched.length, 1, '复制失败要退回下载');
+    assert.match(fetched[0], /\/media\/images\/img1.jpg$/);
+    assert.equal(fs.readFileSync(path.join(dir, 'img1.jpg'), 'utf8'), 'downloaded');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

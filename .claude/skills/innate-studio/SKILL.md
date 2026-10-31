@@ -144,6 +144,39 @@ innate canvas node set <画布id> <节点id> --prompt --edit edits.json
 - **只有你自己在动这张画布时**才用 `canvas update`。用户在页面上开着同一张画布时，页面会把整份节点 PUT 回来，你在它读和写之间塞进去的修改会被覆盖——改字一律走 `canvas node set`。
 - 改完 `prompt` 不会自动重新生成：CLI 没有「执行节点」的命令，需要用户在页面上点生成。
 
+### 先看一眼素材再改：`canvas node get … inputs`
+
+「这个节点到底吃了什么」没法从节点数据里看出来——参考图、首尾帧、参考视频/音频全在连线上。这条命令把它们连同文件路径一起列出来：
+
+```bash
+innate canvas node get <画布id> <节点id> inputs        # 推荐写法
+innate canvas node get inputs <画布id> <节点id>        # 同上
+innate canvas node get <画布id> <节点id> --inputs      # 同上
+```
+
+```
+video 2  66c62a1a-…  输入 2 项（doubao-seedance-2-5-260628）
+  自身内容: /…/data/videos/06dcb09d-….mp4  18 MB
+  [参考图]  image 6  84e71245  /…/data/uploads/up_26b7….png  12 MB
+  [参考视频]  video 3  4a30537e  /…/data/uploads/up_610a….mp4  16 MB
+```
+
+- 每项都有 `role` / `roleLabel`（参考图、首帧、尾帧、参考视频、参考音频、文本）和 `localPath`——**本机绝对路径，直接读这个文件就是模型看到的那张图**，不用先下载。
+- 来源有两种：`via: "upload"`（本机传上去的）和 `via: "record"`（这个节点上生成出来的，`recordId` 换成了结果文件）。文本来源直接给 `text`，并注明它会**拼在提示词前面**（除非提示词里用 `@文本 1` 指名）。
+- `ready: false` 表示这次生成用不上：上游还没生成/没上传、文件被删了、或者连线指向的节点已经不在画布上（`roleLabel: "已丢失"`）。此时 `localPath` 是 `null`，不会给假路径。
+- 图片节点没有连进图片时，它自己现在的图会当底图（`role: "self"`）；视频节点挂了静帧当首帧、或选了「用自身做参考」也会列出来。这些判断和页面执行时一致（同一套规则）。
+- 输出里只在 `ready: false` 时多打一行原因，正常情况一行一个素材。
+
+### 取单个文件：`innate media`
+
+```bash
+innate media img_588d9ea26e7cbf6a9b984343              # 生成记录 id
+innate media /media/uploads/up_26b78854a8abf057791f0fa0.png
+innate media /media/uploads/up_26b7….png --out ./refs   # 复制一份到指定目录
+```
+
+第一行输出就是路径，脚本里可以直接 `f=$(innate media img_xxx)`。本机已经有文件就**不复制**（大视频不白拷一遍）；CLI 和服务不在同一台机器时，那条本机路径不存在，会自动退回按地址下载（默认落到系统临时目录，给了 `--out` 就落到那里）。记录被删、文件被删会直接报错，不给一个不存在的路径。
+
 节点长这样（`canvas update` 的 `--nodes` 文件是**节点数组**）：
 
 ```json

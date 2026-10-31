@@ -18,6 +18,8 @@
 //   innate canvas node set <画布id> <节点id> --prompt --edit '[{"ori_text":"雨夜","new_text":"雪夜"}]'
 //                                                          在现有提示词上按原文替换（可以一次改多处）
 //   innate canvas node list <画布id>                          先看画布上有哪些节点
+//   innate canvas node get <画布id> <节点id> inputs            这个节点吃了哪些素材，给本机路径
+//   innate media /media/uploads/up_xxx.png                    素材在哪：本机路径或下载下来
 //   innate workflow save --canvas <画布id> --name 分镜模板    把整张画布存成可复用的工作流
 //   innate flow list                                          平台工作流（AutoDL.art）目录
 //   innate wait <记录id> --timeout 60
@@ -297,6 +299,56 @@ async function cmdUpload(args) {
   return { _cmd: 'upload', url: data.url, size: data.size };
 }
 
+// ---------- 取文件：记录 id 或 /media/... → 本机路径 ----------
+// 本机有文件就把路径直接给出来（大文件不复制），没有才下载到目录里。看了才知道怎么改提示词，靠的就是这个。
+function humanSize(bytes) {
+  if (!bytes) return '';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let n = bytes;
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i += 1; }
+  return `${n >= 10 || i === 0 ? Math.round(n) : n.toFixed(1)} ${units[i]}`;
+}
+
+async function downloadTo(mediaUrl, dest) {
+  const res = await globalThis.fetch(API_URL + mediaUrl, { headers: API_KEY ? { Authorization: `Bearer ${API_KEY}` } : {} });
+  if (!res.ok) throw new Error(`取文件失败：HTTP ${res.status}（${mediaUrl}）`);
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.writeFileSync(dest, Buffer.from(await res.arrayBuffer()));
+  return fs.statSync(dest).size;
+}
+
+async function cmdMedia(args) {
+  const target = args.positionals[0];
+  if (!target || target === true) throw new Error('用法: innate media <记录id|/media/…|https://…> [--out 目录]');
+  const out = str(args.flags.out);
+  // 记录 id、本机地址都问服务端「文件在哪」；公网链接本机肯定没有，直接下。
+  const info = /^https?:\/\//i.test(target)
+    ? { url: target, localPath: null, exists: false, remote: true }
+    : await api('GET', /^\//.test(target) ? `/api/media?url=${encodeURIComponent(target)}` : `/api/media?record=${encodeURIComponent(target)}`);
+  const source = String(info.mediaUrl || info.url || info.localPath || '');
+  const name = info.name || path.basename(source.split('?')[0]) || `innate-${Date.now()}`;
+  // 本机已经有、又没指定目录：直接给路径，不复制一份几十 MB 的。
+  if (info.localPath && !out) return { _cmd: 'media', target, ...info, path: info.localPath, copied: false };
+  const dir = out || path.join(os.tmpdir(), 'innate-media');
+  const dest = path.join(dir, name);
+  const mediaUrl = info.mediaUrl || (/^\//.test(String(info.url || '')) ? info.url : null);
+  // localPath 是服务端算出来的；CLI 和服务不在同一台机器时那个路径不存在，这时改走下载。
+  if (info.localPath) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.copyFileSync(info.localPath, dest);
+      return { _cmd: 'media', target, ...info, path: dest, copied: true, bytes: fs.statSync(dest).size };
+    } catch (err) {
+      if (!mediaUrl) throw new Error(`复制不了 ${info.localPath}：${err.message}`);
+    }
+  }
+  if (!mediaUrl) throw new Error(`拿不到这个文件的路径：${info.note || target}`);
+  if (info.exists === false) throw new Error(`文件不在了：${mediaUrl}（记录或素材可能已被删掉）`);
+  await downloadTo(mediaUrl, dest);
+  return { _cmd: 'media', target, ...info, path: dest, copied: false, bytes: fs.statSync(dest).size };
+}
+
 async function cmdCanvas(args) {
   const sub = args.positionals[0];
   switch (sub) {
@@ -449,11 +501,20 @@ function applyEdits(before, ops, all) {
 }
 
 async function cmdCanvasNode(args) {
-  const sub = args.positionals[0];
-  const canvasId = args.positionals[1];
-  const nodeId = args.positionals[2];
   const flags = args.flags;
-  if (!canvasId) throw new Error('用法: innate canvas node <get|set|list> <画布id> [节点id] [--prompt …]');
+  const sub = args.positionals[0];
+  let rest = args.positionals.slice(1);
+  // inputs 是 get 的一个视角，不是另一个命令：canvas node get <画布id> <节点id> inputs
+  // 也认 canvas node get inputs <画布id> <节点id> 和 --inputs，怎么说都能读到。
+  let view = 'node';
+  if (sub === 'get') {
+    if (rest[0] === 'inputs') { view = 'inputs'; rest = rest.slice(1); }
+    else if (rest[2] === 'inputs') { view = 'inputs'; rest = rest.slice(0, 2); }
+    else if (has(flags, 'inputs')) view = 'inputs';
+  }
+  const canvasId = rest[0];
+  const nodeId = rest[1];
+  if (!canvasId) throw new Error('用法: innate canvas node <get|set|list> <画布id> [节点id] [inputs]');
 
   // 只拿节点清单：画布可能很大，先看一眼有哪几个节点、各自写了什么。
   if (sub === 'list') {
@@ -464,6 +525,11 @@ async function cmdCanvasNode(args) {
   if (!nodeId) throw new Error(`用法: innate canvas node ${sub} <画布id> <节点id>${sub === 'set' ? ' [--prompt "…"]' : ''}`);
 
   if (sub === 'get') {
+    // inputs：这个节点这次生成会用到哪些素材，顺带把 /media/... 换成本机绝对路径，读图不用先下载。
+    if (view === 'inputs') {
+      const data = await api('GET', `/api/canvases/${canvasId}/nodes/${encodeURIComponent(nodeId)}/inputs`);
+      return { _cmd: 'canvas', action: 'node', nodeAction: 'inputs', canvas: canvasId, ...data };
+    }
     const node = await api('GET', `/api/canvases/${canvasId}/nodes/${encodeURIComponent(nodeId)}`);
     return { _cmd: 'canvas', action: 'node', nodeAction: 'get', canvas: canvasId, node };
   }
@@ -707,6 +773,14 @@ function printHuman(out) {
     case 'upload':
       console.log(`已上传: ${out.url}  (${out.size} 字节)`);
       break;
+    case 'media': {
+      // 第一行就是路径：脚本里可以 path=$(innate media img_xxx) 直接用。
+      console.log(out.path);
+      const bits = [out.kind, out.bytes ? humanSize(out.bytes) : null, out.copied ? '已复制' : '本机原文件'].filter(Boolean);
+      if (bits.length) console.log(`  ${bits.join('  ')}`);
+      if (out.note) console.log(`  ${out.note}`);
+      break;
+    }
     case 'canvas':
       if (out.action === 'node') {
         if (out.nodeAction === 'list') {
@@ -715,6 +789,27 @@ function printHuman(out) {
             const head = String(n.prompt || n.text || n.content || '').replace(/\s+/g, ' ').slice(0, 40);
             const bits = [n.hidden ? '隐藏' : '', n.members != null ? `${n.members} 个成员` : ''].filter(Boolean);
             console.log(`  ${n.id}  ${n.type}${n.no ? ` ${n.no}` : ''}${bits.length ? `  [${bits.join('，')}]` : ''}  ${head}`);
+          }
+        } else if (out.nodeAction === 'inputs') {
+          const n = out.node;
+          console.log(`${n.type}${n.no ? ` ${n.no}` : ''}  ${n.id}  输入 ${out.inputs.length} 项${n.model ? `（${n.model}）` : ''}`);
+          const c = out.content;
+          if (c?.via === 'text') {
+            console.log(`  自身内容: 文本「${String(c.text || '').replace(/\s+/g, ' ').slice(0, 40)}」`);
+          } else if (c?.localPath) {
+            console.log(`  自身内容: ${c.localPath}${c.bytes ? `  ${humanSize(c.bytes)}` : ''}`);
+          } else if (c) {
+            console.log(`  自身内容: ${c.mediaUrl || c.url || c.note || '（没有文件）'}`);
+          }
+          for (const item of out.inputs) {
+            const who = item.from === n.id ? '自身' : item.type ? `${item.type}${item.no ? ` ${item.no}` : ''}` : '连线';
+            const where = item.text != null
+              ? `「${String(item.text).replace(/\s+/g, ' ').slice(0, 32)}」${item.role === 'text' ? '（拼在提示词前）' : ''}`
+              : item.localPath || item.mediaUrl || item.url || '（没有文件）';
+            const size = item.bytes ? `  ${humanSize(item.bytes)}` : '';
+            const bad = item.ready === false ? '  ⚠ 这次用不上' : '';
+            console.log(`  [${item.roleLabel || item.role}]  ${who}  ${String(item.from).slice(0, 8)}  ${where}${size}${bad}`);
+            if (item.ready === false && item.note) console.log(`      ${item.note}`);
           }
         } else if (out.nodeAction === 'set') {
           const n = out.node;
@@ -892,7 +987,7 @@ async function cmdDoctor() {
 // ---------- 入口 ----------
 const COMMANDS = {
   models: cmdModels, generate: cmdGenerate, wait: cmdWait, status: cmdStatus,
-  history: cmdHistory, upload: cmdUpload, canvas: cmdCanvas, workflow: cmdWorkflow, flow: cmdFlow,
+  history: cmdHistory, upload: cmdUpload, media: cmdMedia, canvas: cmdCanvas, workflow: cmdWorkflow, flow: cmdFlow,
   voices: cmdVoices, cost: cmdCost, state: cmdState, config: cmdConfig, doctor: cmdDoctor,
 };
 
@@ -915,10 +1010,15 @@ const USAGE = `Innate Studio Agent CLI
   history [--limit N]                    生成记录与余额
   history delete <记录id>                删一条记录（含磁盘上的结果文件）
   upload <本地文件>                      上传参考素材，返回 /media/uploads/... 地址
+  media <记录id|/media/…|https://…> [--out 目录]
+                                         换成能直接打开的本机文件路径；本机有就不复制，
+                                         没有（多机、公网链接）才下到 --out 或临时目录
   canvas create --name <名> | get <id> | list | delete <id>
   canvas update <id> [--nodes <文件.json>]   整份替换节点（不是追加）
   canvas node list <画布id>                  列出节点：id、类型、编号、提示词开头
   canvas node get  <画布id> <节点id>         读一个节点的完整数据
+  canvas node get  <画布id> <节点id> inputs  这个节点这次生成会用到什么：连进来的参考图/首尾帧/
+                                         参考视频/音频、上游文本、自身内容当底图——都给本机路径
   canvas node set  <画布id> <节点id> [--prompt "…"] [--text "…"] [--data '{"model":"…"}']
                    [--pos x,y] [--hide|--show]
                                          只改传进来的字段（改提示词用它，别整份 update）；

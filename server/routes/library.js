@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { HttpError, readJsonBody, route } from '../http.js';
-import { localMediaFile } from '../media.js';
+import { localMediaFile, mediaInfo, nodeContentInfo } from '../media.js';
 import { newId } from '../tasks.js';
 import { OFFICIAL_SKILLS } from '../../shared/skills.ts';
 
@@ -103,6 +103,80 @@ route('PATCH', /^\/api\/canvases\/([\w-]+)\/nodes\/([\w.-]+)$/, async ({ req, pa
   canvas.updatedAt = Date.now();
   space.save('canvases');
   return { canvas: canvas.id, node, updatedAt: canvas.updatedAt };
+});
+
+// ---------- 节点吃进来的素材 ----------
+// 一次生成真正用到的东西有三块：连进来的（参考图、首尾帧、参考视频/音频、上游文本）、节点自己放着的内容、
+// 以及节点挂的「用自身内容做底图/首帧」。这里把它们归到一处，并把 /media/... 换成本机绝对路径——
+// agent 要「先看一眼再改提示词」，靠的就是这个路径，不该让它自己猜数据目录。
+
+// 连到视频节点的图片，role 决定它是参考图还是首尾帧；视频、音频的连线只有参考。
+const ROLE_LABEL = { reference: '参考图', first: '首帧', last: '尾帧' };
+function roleLabelOf(kind, role) {
+  if (kind === 'text') return '文本';
+  if (kind === 'video') return '参考视频';
+  if (kind === 'audio') return '参考音频';
+  return ROLE_LABEL[role] || '参考图';
+}
+
+route('GET', /^\/api\/canvases\/([\w-]+)\/nodes\/([\w.-]+)\/inputs$/, async ({ params, space }) => {
+  const canvas = findCanvas(space, params[0]);
+  const node = findNode(canvas, params[1]);
+  const data = node.data || {};
+  const byId = new Map((canvas.nodes || []).map((item) => [item.id, item]));
+  const inputs = [];
+
+  for (const edge of (canvas.edges || []).filter((item) => item.target === node.id)) {
+    const source = byId.get(edge.source);
+    // 连线指向的节点已经不在画布上（手工改过数据、或者粘贴了半截）：列出来说清楚，不静默跳过。
+    if (!source) {
+      inputs.push({ role: edge.data?.role || null, roleLabel: '已丢失', from: edge.source, ready: false, note: '这条连线指向的节点不在画布上了' });
+      continue;
+    }
+    const kind = source.type || edge.data?.kind || 'image';
+    // 文本节点不拼素材，它整段内容会拼到提示词前面（除非提示词里用 @文本 N 指名，那才不算前置）。
+    if (kind === 'text') {
+      inputs.push({ role: 'text', roleLabel: '文本', from: source.id, type: 'text', no: source.data?.no ?? null, text: String(source.data?.text || ''), ready: true, note: '会拼在提示词前面，除非提示词里用 @文本 N 指名它' });
+      continue;
+    }
+    const content = nodeContentInfo(space, source);
+    // 只有「本机有这个文件」或「公网直链」才算真能用；文件被删了、记录被删了都不算。
+    const usable = Boolean(content && (content.localPath || content.remote));
+    inputs.push({
+      role: kind === 'image' ? edge.data?.role || 'reference' : 'reference',
+      roleLabel: roleLabelOf(kind, edge.data?.role),
+      from: source.id,
+      type: kind,
+      no: source.data?.no ?? null,
+      ...(content || { localPath: null, exists: false }),
+      // 上游还没生成 / 没上传时它进不了这次请求，这一点比路径本身更值得先说。
+      ready: usable,
+      ...(usable ? {} : { note: content ? '上游节点的文件不在本机了（记录被删，或结果还没下载下来）' : '上游节点还没有内容（没生成也没上传）' }),
+    });
+  }
+
+  // 节点自身内容当输入用的两种情况，和页面 run.ts 里的判断一致：
+  // 图片节点没有连进来的图片时，拿自己现在的图当底图（ignoreSelfRef 关掉就不算）；
+  // 视频节点挂了静帧当首帧，或者选了「用自身做参考」。
+  const own = nodeContentInfo(space, node);
+  const ownUsable = Boolean(own && (own.localPath || own.remote));
+  if (node.type === 'image' && own && own.via !== 'text' && !data.ignoreSelfRef && !inputs.some((item) => item.type === 'image')) {
+    inputs.push({ role: 'self', roleLabel: '底图（自身内容）', from: node.id, type: 'image', ...own, ready: ownUsable, note: '没有连进图片时用它当底图' });
+  }
+  if (node.type === 'video') {
+    if (data.selfFrame?.url && !inputs.some((item) => item.type === 'image')) {
+      inputs.push({ role: 'first', roleLabel: '首帧（挂的静帧）', from: node.id, type: 'image', name: data.selfFrame.name || null, ...mediaInfo(space, data.selfFrame.url) });
+    } else if (data.selfRole === 'reference' && own && own.via !== 'text' && !inputs.some((item) => item.type === 'video')) {
+      inputs.push({ role: 'reference', roleLabel: '参考视频（自身内容）', from: node.id, type: 'video', ...own });
+    }
+  }
+
+  return {
+    canvas: canvas.id,
+    node: { id: node.id, type: node.type, no: data.no ?? null, model: data.model ?? null, prompt: data.prompt ?? null, text: data.text ?? null },
+    content: own,
+    inputs,
+  };
 });
 
 route('DELETE', /^\/api\/canvases\/([\w-]+)$/, async ({ params, space }) => {
