@@ -2,9 +2,9 @@
 // 结果是一条普通的生成记录，节点只记它的 id，进度跟着「创作记录」的轮询走。
 
 import type { Edge, Node, ReactFlowInstance } from '@xyflow/react';
-import { api, state, KINDS, startHistoryLoop, loadHistory, polishModel, canManage, usesCredits, flowModelsOf, flowSummary, flowReady, canvasPlace } from '../store.ts';
+import { api, state, startHistoryLoop, loadHistory, polishModel, canManage, usesCredits, flowModelsOf, flowSummary, flowReady, canvasPlace } from '../store.ts';
 import { fmtCredits, fmtYuan } from '../format.ts';
-import { quoteCost, toCredits } from '../../../shared/models.ts';
+import { quoteCost, toCredits, refLimitsOf } from '../../../shared/models.ts';
 import { durationOf, flowInputs, isFlowModel, workflowCost, type FlowMedia } from '../../../shared/autodl.ts';
 import { defaults, fitImageQuality, fitImageSize, hasLastFrame, imageRefLimit, specOf } from '../composer/state.ts';
 import { buildVideoRequest, buildImageRequest, buildSpeechRequest, buildSfxRequest } from '../request.ts';
@@ -51,7 +51,9 @@ function videoRequest(node: Node, sources: { link: LinkData; node: Node }[], pro
     const kind = link.kind as Kind;
     const output = outputOf(source) || (forQuote ? { url: '', name: '' } : null);
     if (!output) throw new Error(`上游${NODE_LABELS[kind]}节点尚未生成`);
-    if (++counts[kind] > KINDS[kind].max) throw new Error(`参考${NODE_LABELS[kind]}最多 ${KINDS[kind].max} 个`);
+    // 上限按模型来：2.5 收 30 图 + 10 视频 + 10 音频，其余型号 9/3/3（shared/models.ts 登记的）。
+    const limit = refLimitsOf(specOf(data.model))[kind];
+    if (++counts[kind] > limit) throw new Error(`参考${NODE_LABELS[kind]}最多 ${limit} 个`);
     const role = kind === 'image' ? link.role || 'reference' : 'reference';
     if (role === 'last' && !hasLastFrame(data.model)) throw new Error(`${data.model} 不支持尾帧`);
     inputs.push({ kind, role, ref: { uid: crypto.randomUUID(), kind, source: 'local', url: output.url, name: output.name, thumb: null } });
@@ -386,10 +388,14 @@ export async function runAll(flow: Flow, ids: string[], snap: () => void) {
 // ---------- 新节点的默认参数 ----------
 
 // 视频节点的分辨率、比例、时长要落在所选模型支持的范围里；换模型之后不在范围里的换成它支持的第一个。
+// 生成方式这个模型不支持（MiniMax 不能编辑/延长，不收首帧的模型不能首尾帧）、时长不能交给模型决定时，也一并退回去。
 export function fitVideo(data: VideoData): VideoData {
   const able = specOf(data.model);
   const pick = <T,>(list: T[], value: T) => (list.includes(value) || !list.length ? value : list[0]);
-  return { ...data, resolution: pick(able.resolutions, data.resolution), ratio: pick(able.ratios, data.ratio), duration: pick(able.durations, data.duration) };
+  let { mode } = data;
+  if (mode === 'frames' && !able.frames.includes('first_frame')) mode = 'reference';
+  if ((mode === 'edit' || mode === 'extend') && !able.editExtend) mode = 'reference';
+  return { ...data, mode, resolution: pick(able.resolutions, data.resolution), ratio: pick(able.ratios, data.ratio), duration: pick(able.durations, data.duration), ...(able.autoDuration ? {} : { durationAuto: false }) };
 }
 
 // 新建节点时的参数跟创作页当前选的一致，选的模型不在了就用列表里的第一个。

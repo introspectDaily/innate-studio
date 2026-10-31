@@ -64,6 +64,17 @@ export interface VideoCapabilities {
   autoDuration: boolean;
 }
 
+// 参考素材的上限：图片、视频、音频各几个。2.0 系列和 MiniMax 一样都是 15 个（9 图 + 3 视频 + 3 音频），
+// 2.5 提升到 50 个（30 图 + 10 视频 + 10 音频），所以只有它单独登记，其余型号不给就用这份默认。
+// 出处：火山方舟《Doubao Seedance 2.5 教程》的能力概述（2026-11-01 读的）。
+export interface RefLimits {
+  image: number;
+  video: number;
+  audio: number;
+}
+const DEFAULT_REF_LIMITS: RefLimits = { image: 9, video: 3, audio: 3 };
+export const refLimitsOf = (spec?: VideoSpec): RefLimits => spec?.refLimits || DEFAULT_REF_LIMITS;
+
 // 火山方舟的每个视频模型支持什么，登记成这个样子（见下面的 ARK_VIDEO_MODELS），由本地服务交给页面。
 export interface VideoSpec extends VideoCapabilities {
   // 能指定哪几种帧：first_frame、last_frame。一种都没有就只能文生视频。
@@ -73,6 +84,14 @@ export interface VideoSpec extends VideoCapabilities {
   seed: boolean;
   // 必须写提示词，只给素材不行。不写就是可以不写。
   promptRequired?: boolean;
+  // 参考素材的上限。不写就是 9 图 + 3 视频 + 3 音频（2.0 系列和 MiniMax 的上限）。
+  refLimits?: RefLimits;
+  // 纯音频参考（不带图片、视频）也能生成。只有 2.5 支持，2.0 系列的音频参考必须搭配图片或视频。
+  audioOnlyRefs?: boolean;
+  // 能不能编辑/延长视频（要连一段参考视频当原片）。只有 Seedance 2.5 支持，2.0 系列和 MiniMax 都不支持。
+  editExtend?: boolean;
+  // 支持用 omni_reference_task_type 显式指定子任务类型（参考/编辑/延长），把参数报错前置。只有 Seedance 2.5。
+  taskTypeParam?: boolean;
 }
 
 const range = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => from + i);
@@ -84,11 +103,14 @@ const range = (from: number, to: number) => Array.from({ length: to - from + 1 }
 // 型号后面那串数字是版本日期，官方出了新版本要来这里改。
 
 const ARK_RATIOS = ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'];
-const arkVideo = (resolutions: string[], maxSeconds: number): VideoSpec => ({ resolutions, ratios: ARK_RATIOS, durations: range(4, maxSeconds), autoDuration: false, frames: ['first_frame', 'last_frame'], audio: true, seed: true });
+// 方舟全系：时长都能交给模型决定（-1，官方约定 4~15 或 4~30 秒、-1 由模型自动选）。编辑/延长只有 2.5 有，单独登记。
+const arkVideo = (resolutions: string[], maxSeconds: number, extra: Partial<VideoSpec> = {}): VideoSpec => ({ resolutions, ratios: ARK_RATIOS, durations: range(4, maxSeconds), autoDuration: true, frames: ['first_frame', 'last_frame'], audio: true, seed: true, ...extra });
 
 // 按这个顺序列给用户：新的在前，同一代里品质高的在前。
 export const ARK_VIDEO_MODELS: Record<string, VideoSpec> = {
-  'doubao-seedance-2-5-260628': arkVideo(['480p', '720p', '1080p'], 30),
+  // 2.5：参考素材合计 50 个（30 图 + 10 视频 + 10 音频），纯音频参考不用搭配图片或视频；
+  // 还能用 omni_reference_task_type 显式指定参考/编辑/延长；编辑/延长视频也是它独有的。
+  'doubao-seedance-2-5-260628': arkVideo(['480p', '720p', '1080p'], 30, { taskTypeParam: true, editExtend: true, refLimits: { image: 30, video: 10, audio: 10 }, audioOnlyRefs: true }),
   'doubao-seedance-2-0-260128': arkVideo(['480p', '720p', '1080p', '4k'], 15),
   'doubao-seedance-2-0-fast-260128': arkVideo(['480p', '720p'], 15),
   'doubao-seedance-2-0-mini-260615': arkVideo(['480p', '720p'], 15),
@@ -288,8 +310,9 @@ function baseQuoteCost(item: { model?: string; kind?: string; tool?: string; pro
     const [width, height] = (sizes[payload.aspect_ratio] || sizes['1:1']).split('x').map(Number);
     return price(width * height) + (name === 'seedream-5-0-pro' ? Math.max(0, refs.length - 1) * ARK_IMAGE_REF_PRICE : 0);
   }
-  const seconds = Number(payload.duration);
-  if (!(seconds > 0)) return null;
+  // 时长交给模型决定（-1）时还不知道成片多长，先按上限 30 秒预估，出账再按实际时长算。
+  const chosen = Number(payload.duration);
+  const seconds = chosen > 0 ? chosen : 30;
   const hasVideo = refs.some((ref) => ref?.video_url);
   const minimax = MINIMAX_VIDEO_PRICES[model];
   if (minimax) {

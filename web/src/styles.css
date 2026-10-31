@@ -1086,8 +1086,17 @@ input[type='search']::-webkit-search-cancel-button { -webkit-appearance: none; }
 .cnode-sheet { gap: var(--sp-12); width: 300px; padding: var(--sp-4); }
 .cnode-opts { display: flex; flex-wrap: wrap; gap: var(--sp-4); }
 .cnode-opt { height: var(--h-sm); padding: 0 var(--sp-12); border: 0; border-radius: var(--r-xs); background: var(--surface-2); color: var(--text-2); font-size: var(--text-ui); font-variant-numeric: tabular-nums; cursor: pointer; transition: background-color var(--t-fast) var(--ease), color var(--t-fast) var(--ease); }
+.cnode-opt:has(.cnode-opt-note) { height: auto; padding: var(--sp-4) var(--sp-12); }
+.cnode-opt-note { display: block; font-size: var(--text-caption); color: var(--text-3); }
+.cnode-opt.active .cnode-opt-note { color: inherit; opacity: 0.72; }
+.cnode-sheet .duration-row { gap: 0; }
+.cnode-auto { display: flex; align-items: center; gap: var(--sp-8); margin-top: var(--sp-8); color: var(--text-2); font-size: var(--text-ui); }
 @media (hover: hover) { .cnode-opt:hover { color: var(--text); } }
 .cnode-opt.active { background: var(--text); color: var(--bg); }
+/* 参数面板里的自由输入（随机种子这类）：一行占满，和上面的小方块同一套圆角和字色 */
+.cnode-text { width: 100%; height: var(--h-sm); padding: 0 var(--sp-12); border: 1px solid var(--border-strong); border-radius: var(--r-xs); background: var(--surface-2); color: var(--text); font-size: var(--text-ui); font-variant-numeric: tabular-nums; }
+.cnode-text::placeholder { color: var(--text-3); }
+.cnode-text:focus { outline: none; border-color: var(--border-hover); }
 .cnode-note { padding: 0 var(--sp-8); color: var(--text-3); font-size: var(--text-caption); }
 
 /* 连线：一条细线，不带标签。两头的节点有一个被选中，或者线自己被选中时变亮 */

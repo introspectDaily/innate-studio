@@ -250,6 +250,49 @@ test('成员列表带着每人的积分余额和本月用量；改自己的密�
   assert.ok(fs.existsSync(path.join(dataDir, 'users', member.id, 'history.json')));
 });
 
+test('Agent 令牌：只读令牌能读、能等结果，但写不了；--scope read 不带等号也认', async () => {
+  const asKey = async (token, method, url, body) => {
+    const headers = { Authorization: `Bearer ${token}` };
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    const res = await fetch(base + url, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+    const json = /application\/json/i.test(res.headers.get('content-type') || '');
+    const text = await res.text();
+    return { status: res.status, data: json && text ? JSON.parse(text) : text };
+  };
+  const make = (...args) => /令牌：(\S+)/.exec(cli('token', 'add', '--user', 'owner', ...args))[1];
+
+  // 空格写法（用法说明里的写法）必须真的生效，否则会悄声创建出 write 令牌。
+  const readToken = make('--name', '只读', '--scope', 'read');
+  const writeToken = make('--name', '读写', '--scope', 'write');
+
+  // 读：模型、记录、自己的文件都能看。
+  assert.equal((await asKey(readToken, 'GET', '/api/models')).status, 200);
+  assert.equal((await asKey(readToken, 'GET', '/api/history')).data.items[0].id, 'img_old');
+  assert.equal((await asKey(readToken, 'GET', '/media/images/img_old.jpg')).status, 200);
+
+  // 写：生成、上传都不行，且明确告诉调用者换 write 令牌。
+  for (const [method, url, body] of [
+    ['POST', '/api/images', { payload: { model: IMAGE, prompt: '只读令牌不该能画', n: 1 } }],
+    ['POST', '/api/uploads', {}],
+    ['POST', '/api/canvases', { name: '只读令牌不该能建' }],
+    ['DELETE', '/api/history/img_old', undefined],
+  ]) {
+    const res = await asKey(readToken, method, url, body);
+    assert.equal(res.status, 403, `${method} ${url}`);
+    assert.equal(res.data.error.code, 'read_only_key');
+  }
+  assert.equal((await asKey(readToken, 'GET', '/api/history')).data.items.length, 1, '删不掉');
+
+  // 轮询是读：只读令牌也得能等任务结果，否则 agent 看不到自己发起/页面上发起的任务。
+  const polled = await asKey(readToken, 'POST', '/api/history/img_old/refresh?wait=1');
+  assert.equal(polled.status, 200);
+  assert.equal(polled.data.id, 'img_old');
+
+  // 读写令牌照常能写（这里故意给非法参数，400 说明请求已经进到接口里了，没被拦在门外）。
+  const allowed = await asKey(writeToken, 'POST', '/api/images', { payload: { prompt: '没给模型' } });
+  assert.equal(allowed.status, 400);
+});
+
 test('别的网站发来的请求被拦下；退出登录后 Cookie 失效', async () => {
   const crossSite = await call('owner', 'GET', '/api/history', undefined, { Origin: 'https://evil.example' });
   assert.equal(crossSite.status, 403);

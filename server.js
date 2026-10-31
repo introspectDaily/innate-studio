@@ -44,6 +44,11 @@ function isTrustedRequest(req) {
 
 const needLogin = (res) => sendJson(res, 401, { error: { code: 'login_required', message: '请先登录' } });
 
+// 只读令牌（scope=read）默认只放行 GET。但"看任务跑完没有"本身就是读：轮询接口虽然用 POST
+// （要改记录的状态、拉一次结果），它不产生花费也不改用户的东西，所以一起放行——
+// 否则只读的 agent 连自己发起、或页面上已经发起的那条任务都等不到结果。
+const POLL_ONLY = [/^\/api\/history\/[^/]+\/refresh$/];
+
 async function handle(req, res) {
   const url = new URL(req.url, `http://${HOST}:${PORT}`);
   const pathname = decodeURIComponent(url.pathname);
@@ -55,9 +60,9 @@ async function handle(req, res) {
   if ((isApi || isMedia) && !isTrustedRequest(req) && !key) {
     return sendJson(res, 403, { error: { code: 'forbidden', message: '只接受本机页面发来的请求' } });
   }
-  // 只读令牌（scope=read）只放行 GET；要生成/上传就得用 scope=write 的 key。
-  if (key && key.scope === 'read' && req.method !== 'GET') {
-    return sendJson(res, 403, { error: { code: 'read_only_key', message: '该令牌为只读，不能执行写操作' } });
+  // 只读令牌（scope=read）只放行 GET 和轮询；要生成/上传就得用 scope=write 的 key。
+  if (key && key.scope === 'read' && req.method !== 'GET' && !POLL_ONLY.some((re) => re.test(pathname))) {
+    return sendJson(res, 403, { error: { code: 'read_only_key', message: '该令牌为只读，不能执行写操作；要生成请换成 scope=write 的令牌' } });
   }
   const user = (isApi || isMedia) ? userOf(req) : null;
 

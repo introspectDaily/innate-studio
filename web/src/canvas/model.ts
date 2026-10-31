@@ -102,6 +102,14 @@ export interface VideoData extends Generated {
   resolution: string;
   ratio: string;
   duration: number;
+  // 时长交给模型决定（发 -1）。方舟的模型都支持；不写就是按 duration 的秒数生成。
+  durationAuto?: boolean;
+  // 生成方式：全能参考（不写就是它）、首尾帧、编辑视频、延长视频。模型不支持的会在 fitVideo 里退回全能参考。
+  mode?: VideoForm['mode'];
+  // 要不要生成声音。不写就是有声（和创作页的默认一致）。模型不支持时（MiniMax）发不出去，界面上也不显示。
+  generateAudio?: boolean;
+  // 随机种子。空着就是每次随机。模型不支持时界面上不显示。
+  seed?: string;
   // 一次生成几段。不写就是一段。
   count?: number;
   // 节点里那段视频实际的宽高比，读到之后记下，节点的框按它定宽度。
@@ -216,11 +224,12 @@ export interface MediaInput {
 }
 
 // 把连进视频节点的素材排成视频表单里的首尾帧和参考素材。
-// 有一条连线标了首帧或尾帧，就按首尾帧生成；否则有素材就是参考生成，没有就是文生视频。
+// 生成方式按节点上选的来（没选过就是全能参考）；老节点没选过方式、但连线标了首帧/尾帧用途的，按首尾帧生成。
 export function videoFormFrom(base: VideoForm, data: VideoData, prompt: string, inputs: MediaInput[]): { form: VideoForm; problems: string[] } {
   const problems: string[] = [];
-  const firsts = inputs.filter((i) => i.kind === 'image' && i.role === 'first');
-  const lasts = inputs.filter((i) => i.kind === 'image' && i.role === 'last');
+  const images = inputs.filter((i) => i.kind === 'image');
+  // 生成方式按节点上选的来；没选过的老节点按连线推：标了首帧/尾帧用途是首尾帧，连了素材是全能参考，什么都没有是文生视频。
+  const mode: VideoForm['mode'] = data.mode ?? (images.some((i) => i.role !== 'reference') ? 'frames' : inputs.length ? 'reference' : 'text');
   const form: VideoForm = {
     ...base,
     prompt,
@@ -228,20 +237,35 @@ export function videoFormFrom(base: VideoForm, data: VideoData, prompt: string, 
     resolution: data.resolution,
     ratio: data.ratio,
     duration: data.duration,
-    durationAuto: false,
-    mode: 'text',
+    durationAuto: data.durationAuto === true,
+    // 声音和种子是节点上选的；没选过就按创作页的默认（有声、随机）。
+    generateAudio: data.generateAudio !== false,
+    seed: data.seed || '',
+    mode,
     frames: { first: null, last: null },
     refs: { image: [], video: [], audio: [] },
   };
-  if (firsts.length || lasts.length) {
-    form.mode = 'frames';
-    form.frames = { first: firsts[0]?.ref || null, last: lasts[0]?.ref || null };
-    if (firsts.length > 1) problems.push('首帧只能有一张');
-    if (lasts.length > 1) problems.push('尾帧只能有一张');
-    if (!firsts.length) problems.push('只有尾帧不够，还需要一张首帧');
-    if (inputs.length > firsts.length + lasts.length) problems.push('首尾帧与参考素材不能同时使用');
-  } else if (inputs.length) {
-    form.mode = 'reference';
+  if (mode === 'frames') {
+    // 首尾帧：连线标了首帧/尾帧用途的按用途来；都没标就按连线顺序，第一张是首帧、第二张是尾帧（模型不支持尾帧时请求拼装会丢掉）。
+    const firsts = images.filter((i) => i.role === 'first');
+    const lasts = images.filter((i) => i.role === 'last');
+    if (firsts.length || lasts.length) {
+      form.frames = { first: firsts[0]?.ref || null, last: lasts[0]?.ref || null };
+      if (firsts.length > 1) problems.push('首帧只能有一张');
+      if (lasts.length > 1) problems.push('尾帧只能有一张');
+      if (!firsts.length) problems.push('只有尾帧不够，还需要一张首帧');
+      if (inputs.length > firsts.length + lasts.length) problems.push('首尾帧与参考素材不能同时使用');
+    } else {
+      form.frames = { first: images[0]?.ref || null, last: images[1]?.ref || null };
+      if (!images.length) problems.push('首尾帧方式需要连图片节点，或换回全能参考');
+      if (inputs.length > images.length) problems.push('首尾帧只能用图片，视频和音频请换回全能参考');
+    }
+  } else if (mode === 'edit' || mode === 'extend') {
+    // 编辑/延长：连进来的素材都当参考，但必须有一段视频当原片；编辑的成片时长跟原片走。
+    for (const input of inputs) form.refs[input.kind].push(input.ref);
+    if (!form.refs.video.length) problems.push(mode === 'edit' ? '编辑视频要连一段视频节点当原片' : '延长视频要连一段视频节点当原片');
+    if (mode === 'edit') form.durationAuto = true;
+  } else {
     for (const input of inputs) form.refs[input.kind].push(input.ref);
   }
   return { form, problems };

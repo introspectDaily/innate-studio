@@ -22,7 +22,8 @@ export function carryRefs(form: VideoForm, mode: VideoForm['mode'], maxImages: n
   if (mode === 'frames' && !frames.first && images.length) {
     frames.first = images[0];
     images = images.slice(1);
-  } else if (mode === 'reference') {
+  // 换到非首尾帧的方式（全能参考、编辑、延长）时，首尾帧槽里的图退回参考图。
+  } else if (mode !== 'frames') {
     const moved: Ref[] = [];
     for (const key of ['first', 'last'] as const) {
       const ref = frames[key];
@@ -43,7 +44,8 @@ export function carryRefs(form: VideoForm, mode: VideoForm['mode'], maxImages: n
 export function buildVideoRequest(form: VideoForm, spec: VideoSpec): BuiltRequest {
   const problems: string[] = [];
   const text = form.prompt.trim();
-  const payload: Record<string, unknown> = { model: form.model, duration: Number(form.duration), resolution: form.resolution };
+  // 时长交给模型决定时发 -1（官方约定），其余按选的秒数发。
+  const payload: Record<string, unknown> = { model: form.model, duration: form.durationAuto ? -1 : Number(form.duration), resolution: form.resolution };
   if (text) payload.prompt = text;
   const media = (ref: Ref) => ({ type: MEDIA_FIELD[ref.kind], [MEDIA_FIELD[ref.kind]]: { url: ref.url } });
 
@@ -55,17 +57,30 @@ export function buildVideoRequest(form: VideoForm, spec: VideoSpec): BuiltReques
     else problems.push('请添加首帧图片');
     if (form.frames.last && spec.frames.includes('last_frame')) frames.push({ ...media(form.frames.last), frame_type: 'last_frame' });
     payload.frame_images = frames;
+  } else if (form.mode === 'edit' || form.mode === 'extend') {
+    // 编辑/延长：素材照参考生成那样发，但必须有一段参考视频当原片，比例跟原片走（adaptive，不发 aspect_ratio），
+    // 编辑的时长必须交给模型（-1，跟随原视频）。2.5 用 omni_reference_task_type 显式指定子任务，把参数报错前置；
+    // 2.0 系列没有这个参数，任务类型由提示词意图判定。
+    const refs = [...form.refs.image, ...form.refs.video, ...form.refs.audio];
+    payload.input_references = refs.map(media);
+    if (!form.refs.video.length) problems.push(form.mode === 'edit' ? '编辑视频需要一段参考视频，请添加或连接视频' : '延长视频需要一段参考视频，请添加或连接视频');
+    if (!text) problems.push(`请输入提示词，说明要${form.mode === 'edit' ? '怎么改' : '怎么接'}`);
+    if (form.mode === 'edit') payload.duration = -1;
+    if (spec.taskTypeParam) payload.omni_reference_task_type = form.mode;
   } else {
     const refs = [...form.refs.image, ...form.refs.video, ...form.refs.audio];
     payload.input_references = refs.map(media);
-    if (!text && !form.refs.image.length && !form.refs.video.length) {
-      problems.push(form.refs.audio.length ? '仅有音频无法生成，请添加提示词、图片或视频' : '请输入提示词，或添加参考图片、视频');
+    // 2.5 支持纯音频参考；其余模型（2.0 系列、MiniMax）的音频必须搭配图片或视频。
+    if (!text && !form.refs.image.length && !form.refs.video.length && !form.refs.audio.length) {
+      problems.push('请输入提示词，或添加参考图片、视频');
+    } else if (!text && !form.refs.image.length && !form.refs.video.length && form.refs.audio.length && !spec.audioOnlyRefs) {
+      problems.push('仅有音频无法生成，请添加提示词、图片或视频');
     }
   }
   // 有的模型（MiniMax H3）只给素材不行，必须写提示词。
   if (spec.promptRequired && !text && !problems.length) problems.push('请输入提示词');
-  // 有首帧时画面比例跟着图片走，其余情况才需要指定。
-  if (form.mode !== 'frames') payload.aspect_ratio = form.ratio;
+  // 有首帧时画面比例跟着图片走，编辑/延长跟原视频走（adaptive）；其余情况才需要指定。
+  if (!['frames', 'edit', 'extend'].includes(form.mode)) payload.aspect_ratio = form.ratio;
 
   if (spec.audio) payload.generate_audio = Boolean(form.generateAudio);
   const seed = String(form.seed).trim();

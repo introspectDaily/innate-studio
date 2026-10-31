@@ -19,7 +19,7 @@ import { IMAGE_QUALITY_LABELS, REFERENCE_MODE_LABEL, estimateCost } from '../../
 import { ruleLabel } from '../../shared/autodl.ts';
 import type { CreateType, HistoryItem, Ref } from './types.ts';
 
-const MODE_LABELS: Record<string, string> = { text: '文生视频', frames: '首尾帧' };
+const MODE_LABELS: Record<string, string> = { text: '文生视频', frames: '首尾帧', edit: '编辑视频', extend: '延长视频' };
 const STATUS_LABELS: Record<string, string> = { queued: '排队中', in_progress: '生成中', completed: '已完成', failed: '失败' };
 const KIND_LABELS = { video: '视频', image: '图片', audio: '音频' };
 // 五种内容，和创作页输入框上方的切换是同一组。工作流是 AutoDL.art 上跑的 ComfyUI 工作流。

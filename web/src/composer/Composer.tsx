@@ -21,7 +21,7 @@ import {
   TYPES, typeOf, draftPrompt, specOf, hasLastFrame, imageRatios, imageSizes, imageQualities, imageRefLimit, currentCredits, submitProblem,
   update, setMode, swapFrames, updateStudio, setType, typePrompt, polish, undoPolish, submit, registerPrompt,
   voiceName, voiceNote, togglePreview, setVoiceFilter, pickVoice, stopPreview, useCharacter, activeSkill, setSkill,
-  addableKinds, mediaRoom, usedMediaUrls, addMedia, addFiles, dismissSubmitError,
+  addableKinds, mediaRoom, usedMediaUrls, addMedia, addFiles, dismissSubmitError, refLimitOf,
   flowDefinition, flowSlots, flowPrimaryKey, pickFlow, setFlowValue, setFlowRef, loadFlowDefinition,
 } from './state.ts';
 
@@ -30,10 +30,17 @@ const REFERENCE_MODE: Mode = { value: 'reference', label: REFERENCE_MODE_LABEL, 
 const FRAMES_MODE: Mode = { value: 'frames', label: '首尾帧', icon: 'frames', note: '尾帧可选' };
 // 只能给首帧、不能给尾帧的模型，第二种方式叫「图生视频」。
 const FIRST_FRAME_MODE: Mode = { value: 'frames', label: '图生视频', icon: 'frames', note: '以图片为首帧' };
+// 编辑/延长：要有一段参考视频当原片。方舟的模型都支持。
+const EDIT_MODE: Mode = { value: 'edit', label: '编辑视频', icon: 'wand', note: '改原片的画面或声音，时长跟随原视频' };
+const EXTEND_MODE: Mode = { value: 'extend', label: '延长视频', icon: 'expand', note: '从原片向前或向后接着拍' };
 // 当前模型能用的生成方式。默认是全能参考，它不加素材就是文生视频，所以不单列「文生视频」。
 function modesFor() {
-  const { frames } = specOf();
-  return [REFERENCE_MODE, ...(frames.includes('first_frame') ? [frames.includes('last_frame') ? FRAMES_MODE : FIRST_FRAME_MODE] : [])];
+  const { frames, editExtend } = specOf();
+  return [
+    REFERENCE_MODE,
+    ...(frames.includes('first_frame') ? [frames.includes('last_frame') ? FRAMES_MODE : FIRST_FRAME_MODE] : []),
+    ...(editExtend ? [EDIT_MODE, EXTEND_MODE] : []),
+  ];
 }
 // 和官方提示词里指代素材的叫法一致：图片1、视频1、音频1。缩略图上不写，鼠标停上去的提示里有。
 const REF_PREFIX: Record<Kind, string> = { image: '图片', video: '视频', audio: '音频' };
@@ -192,7 +199,8 @@ function MediaBlock() {
     // 三种素材共用一个「+」，不用先选类型：上传的、选中的是什么就放进哪一类。
     const addable = addableKinds();
     const addRef = () => openAssetPicker({ title: '添加参考素材', limits: mediaRoom(), usedUrls: usedMediaUrls(), onPick: pick });
-    const full = addable.every((kind) => form.refs[kind].length >= KINDS[kind].max);
+    // 上限按模型来（2.5 比别的型号收得多），满了才收起「+」。
+    const full = addable.every((kind) => form.refs[kind].length >= refLimitOf(kind));
     content = (
       <RefStack
         items={kinds.flatMap((kind) =>
@@ -248,7 +256,7 @@ function VideoToolbar() {
   const mode = modes.find((m) => m.value === form.mode) || modes[0];
   const ratio = RATIOS.find((r) => r.value === form.ratio) || RATIOS[0];
   const models = state.models.includes(form.model) ? state.models : [form.model, ...state.models];
-  const duration = form.durationAuto ? '时长自动' : `${form.duration} 秒`;
+  const duration = form.mode === 'edit' ? '跟随原片' : form.durationAuto ? '时长自动' : `${form.duration} 秒`;
   return (
     <>
       <Dropdown
@@ -424,10 +432,11 @@ function Toolbar() {
   return <VideoToolbar />;
 }
 
-// 「画面」面板：比例和分辨率放在一起。
+// 「画面」面板：比例和分辨率放在一起。编辑/延长时比例跟原视频走，锁住。
 function FramePanel() {
   useStore('composer');
   const { form } = composer;
+  const followSource = form.mode === 'edit' || form.mode === 'extend';
   // 各模型的档位不一样（有的到 4k），直接列它支持的。
   const { resolutions, ratios } = specOf();
   return (
@@ -435,7 +444,7 @@ function FramePanel() {
       <div className="popover-title">画面比例</div>
       <div className="ratio-grid" role="radiogroup" aria-label="画面比例">
         {RATIOS.map((r) => (
-          <button key={r.value} type="button" className={`ratio-option ${form.ratio === r.value ? 'active' : ''}`} role="radio" aria-checked={form.ratio === r.value} disabled={!ratios.includes(r.value)} onClick={() => update({ ratio: r.value })}>
+          <button key={r.value} type="button" className={`ratio-option ${form.ratio === r.value ? 'active' : ''}`} role="radio" aria-checked={form.ratio === r.value} disabled={followSource || !ratios.includes(r.value)} onClick={() => update({ ratio: r.value })}>
             <span className="ratio-box">
               <RatioShape value={r.value} />
             </span>
@@ -445,16 +454,19 @@ function FramePanel() {
       </div>
       <div className="popover-title">分辨率</div>
       <Segmented options={resolutions.map((r) => ({ value: r, label: r }))} value={form.resolution} onChange={(resolution) => update({ resolution })} />
+      {followSource && <div className="small muted">编辑/延长时画面比例跟随原视频</div>}
       {form.mode === 'frames' && <div className="small muted">画面比例跟随首帧</div>}
     </>
   );
 }
 
 // 「时长」面板：一条带刻度的滑杆加一个数字框。有的模型能选 4 到 30 秒，一秒一项列成菜单太长。
+// 编辑视频时成片时长跟随原视频，滑杆和自动开关都锁住。
 function DurationPanel() {
   useStore('composer');
   const { form } = composer;
   const { durations, autoDuration } = specOf();
+  const followSource = form.mode === 'edit';
   const min = durations[0];
   const max = durations[durations.length - 1];
   // 槽从 0 画起，每 5 秒一个刻度。
@@ -470,16 +482,20 @@ function DurationPanel() {
     <>
       <div className="popover-title">时长</div>
       <div className="duration-row">
-        <Slider label="时长" from={0} min={min} max={max} marks={marks} value={form.duration} disabled={form.durationAuto} onChange={(duration) => (setDraft(null), update({ duration }))} />
+        <Slider label="时长" from={0} min={min} max={max} marks={marks} value={form.duration} disabled={form.durationAuto || followSource} onChange={(duration) => (setDraft(null), update({ duration }))} />
         <label className="input duration-field">
-          <input type="number" inputMode="numeric" min={min} max={max} step="1" value={draft ?? String(form.duration)} disabled={form.durationAuto} aria-label="时长（秒）" onChange={(e) => type(e.target.value)} onBlur={() => setDraft(null)} />
+          <input type="number" inputMode="numeric" min={min} max={max} step="1" value={draft ?? String(form.duration)} disabled={form.durationAuto || followSource} aria-label="时长（秒）" onChange={(e) => type(e.target.value)} onBlur={() => setDraft(null)} />
           <span>秒</span>
         </label>
       </div>
-      {autoDuration && (
-        <FormRow label="自动时长">
-          <Toggle checked={form.durationAuto} onChange={(durationAuto) => update({ durationAuto })} label="时长由模型决定" />
-        </FormRow>
+      {followSource ? (
+        <div className="small muted">编辑时成片时长跟随原视频</div>
+      ) : (
+        autoDuration && (
+          <FormRow label="自动时长">
+            <Toggle checked={form.durationAuto} onChange={(durationAuto) => update({ durationAuto })} label="时长由模型决定" />
+          </FormRow>
+        )
       )}
     </>
   );

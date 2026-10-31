@@ -12,7 +12,7 @@ import { withPublicVideos } from '../publishing.js';
 import { MINIMAX_VIDEO_PATH, VIDEO_TASKS_PATH, applyTaskState, downloadResult, finishItem, historyView, isLegacy, isPending, isTimedOut, newId, newItem, pollTask, runDirect } from '../tasks.js';
 import { removeThumb } from '../thumbs.js';
 import { balanceOf, holdCredits, syncCredits } from '../credits.js';
-import { IMAGE_MODELS, imageProvider, videoProvider } from '../../shared/models.ts';
+import { IMAGE_MODELS, VIDEO_MODELS, imageProvider, videoProvider } from '../../shared/models.ts';
 import { doubaoVoices } from '../../shared/doubao-voices.ts';
 
 // ---------- 视频 ----------
@@ -28,6 +28,11 @@ route('POST', /^\/api\/videos$/, async ({ req, space, user }) => {
   }
   const provider = videoProvider(payload.model);
   if (!provider) throw new HttpError(400, 'invalid_request', `不支持视频模型 ${payload.model}`);
+  // 分辨率按模型登记的档位校验（如 2.0 Fast/Mini 只到 720p），旧的画布节点或手工请求带超档值就在这里拦下。
+  const spec = VIDEO_MODELS[payload.model];
+  if (payload.resolution && spec && !spec.resolutions.includes(String(payload.resolution))) {
+    throw new HttpError(400, 'invalid_request', `${payload.model} 不支持 ${payload.resolution}，可选：${spec.resolutions.join('、')}`);
+  }
   const minimax = provider === 'minimax';
   // 先预扣积分再提交；没提交成功就退回。
   const draft = { kind: 'video', model: payload.model, payload };
@@ -79,6 +84,8 @@ function arkVideoRequest(payload) {
     if (kind) content.push({ type: `${kind}_url`, [`${kind}_url`]: ref[`${kind}_url`], role: `reference_${kind}` });
   }
   const request = { model: payload.model, content, resolution: payload.resolution, ratio: payload.aspect_ratio || 'adaptive', duration: payload.duration, watermark: false };
+  // Seedance 2.5 的子任务类型引导（reference/edit/extend）：显式指定能把参数报错前置，其余型号不带。
+  if (payload.omni_reference_task_type) request.omni_reference_task_type = payload.omni_reference_task_type;
   if (typeof payload.generate_audio === 'boolean') request.generate_audio = payload.generate_audio;
   if (Number.isInteger(payload.seed)) request.seed = payload.seed;
   return request;

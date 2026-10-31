@@ -51,7 +51,8 @@ export interface Ref {
 }
 
 export interface VideoForm {
-  mode: 'text' | 'frames' | 'reference';
+  // text 文生视频；frames 首尾帧；reference 全能参考；edit 编辑视频；extend 延长视频。
+  mode: 'text' | 'frames' | 'reference' | 'edit' | 'extend';
   prompt: string;
   model: string;
   resolution: string;

@@ -7,7 +7,7 @@ import { exclusive } from '../playback.ts';
 import { refFromRecord, kindOfFile, uploadLocalFile } from '../media.ts';
 import { toast } from '../ui/layers.tsx';
 import { buildVideoRequest, buildImageRequest, buildSpeechRequest, buildSfxRequest, buildMusicRequest, refsInUse, carryRefs } from '../request.ts';
-import { quoteCost, toCredits, type VideoSpec } from '../../../shared/models.ts';
+import { quoteCost, toCredits, refLimitsOf, type VideoSpec } from '../../../shared/models.ts';
 import { workflowCost, cleanInputs, flowTextKey, flowUuidOf, flowVideoSpec, formValues, isFlowModel, ruleKind, ruleLabel, type InputRule, type WorkflowSummary } from '../../../shared/autodl.ts';
 import type { BuiltRequest, Character, CreateType, FlowSummary, HistoryItem, Kind, Ref, SkillRef, Studio, VideoForm, Voice } from '../types.ts';
 
@@ -180,6 +180,9 @@ function flowSpecOf(model: string): VideoSpec | null {
 }
 
 const allRefs = () => refsInUse(composer.form);
+
+// 当前视频模型收几份某类参考素材：2.5 是 30 图 + 10 视频 + 10 音频，其余 9/3/3（shared/models.ts 登记的）。
+export const refLimitOf = (kind: Kind, model = composer.form.model) => refLimitsOf(specOf(model))[kind];
 
 // ---------- AutoDL.art 的工作流 ----------
 // 选中的工作流是哪一种、参数规则是什么。规则在选中时从详情接口取一份放在内存里（目录接口不带规则）；
@@ -456,8 +459,17 @@ function fitModel() {
   if (!able.autoDuration) form.durationAuto = false;
   if (!able.durations.includes(Number(form.duration))) form.duration = pick(able.durations, 5);
   if (form.mode === 'frames' && !able.frames.includes('first_frame')) form.mode = 'reference';
+  // 这个模型不能编辑/延长视频（MiniMax）时，退回全能参考。
+  if ((form.mode === 'edit' || form.mode === 'extend') && !able.editExtend) form.mode = 'reference';
   // 没有单独的「文生视频」：不加素材的全能参考就是它。
   if (form.mode === 'text') form.mode = 'reference';
+  // 换到参考素材收得少的模型（比如从 2.5 换回 2.0）时，超出的裁掉。模型列表还没读到时不动，免得把 2.5 的素材错裁成默认上限。
+  if (state.videoSpecs[form.model]) {
+    const limits = refLimitsOf(able);
+    form.refs.image = form.refs.image.slice(0, limits.image);
+    form.refs.video = form.refs.video.slice(0, limits.video);
+    form.refs.audio = form.refs.audio.slice(0, limits.audio);
+  }
 }
 
 // 状态改完了：让输入框重画。
@@ -473,7 +485,7 @@ export function update(patch: Partial<VideoForm>) {
 
 // 换生成方式。
 export function setMode(mode: VideoForm['mode']) {
-  update({ mode, ...carryRefs(composer.form, mode, KINDS.image.max) });
+  update({ mode, ...carryRefs(composer.form, mode, refLimitOf('image')) });
 }
 
 // ---------- 添加素材 ----------
@@ -496,7 +508,7 @@ export function mediaRoom(): Partial<Record<Kind, number>> {
   if (studio.type === 'music') return { video: 1 };
   if (studio.type !== 'video' || form.mode === 'text') return {};
   if (form.mode === 'frames') return { image: [form.frames.first, hasLastFrame() ? form.frames.last : true].filter((slot) => !slot).length };
-  return Object.fromEntries(addableKinds().map((kind) => [kind, KINDS[kind].max - form.refs[kind].length]));
+  return Object.fromEntries(addableKinds().map((kind) => [kind, refLimitOf(kind) - form.refs[kind].length]));
 }
 
 // 已经用上的本机文件的地址：选素材时同一份不让加第二次。
@@ -539,7 +551,7 @@ export function addMedia(ref: Ref, slot?: 'first' | 'last'): string | null {
   }
   const list = form.refs[ref.kind];
   if (list.some((r) => sameMedia(r, ref))) return null;
-  if (list.length >= KINDS[ref.kind].max) return `${label}数量已达上限`;
+  if (list.length >= refLimitOf(ref.kind)) return `${label}数量已达上限`;
   update({ refs: { ...form.refs, [ref.kind]: [...list, ref] } });
   return null;
 }
@@ -689,7 +701,7 @@ export function useCharacter(character: Character, type: 'image' | 'video') {
     studio.image.prompt = withDescription(studio.image.prompt, character.description);
     fitImage();
   } else {
-    Object.assign(form, { mode: 'reference', refs: { ...form.refs, image: merged(form.refs.image).slice(0, KINDS.image.max) } });
+    Object.assign(form, { mode: 'reference', refs: { ...form.refs, image: merged(form.refs.image).slice(0, refLimitOf('image', form.model)) } });
     form.prompt = withDescription(form.prompt, character.description);
     fitModel();
   }

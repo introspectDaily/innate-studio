@@ -7,13 +7,14 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { BaseEdge, Handle, NodeToolbar, Position, getBezierPath, useConnection, useEdges, useInternalNode, useReactFlow, useStore as useFlowStore, useUpdateNodeInternals, type ConnectionLineComponentProps, type EdgeProps, type Node, type NodeProps } from '@xyflow/react';
 import { state, useStore, loadVoices, isPendingTask, polishModel, modelOption, flowModelsOf, flowModelLabel, flowSummary, flowReady, canvasPlace, KINDS as MEDIA } from '../store.ts';
 import { RATIOS, fitImageQuality, fitImageSize, hasLastFrame, imageQualities, imageRatios, imageRefLimit, imageSizes, specOf, voiceName } from '../composer/state.ts';
+import { refLimitsOf } from '../../../shared/models.ts';
 import { IMAGE_QUALITY_LABELS, modelLabel, modelNote } from '../../../shared/models.ts';
 import { flowMediaKeys, isFlowModel, ruleDefault, ruleLabel } from '../../../shared/autodl.ts';
 import { recordName, uploadLocalFile } from '../media.ts';
 import { openAssetPicker } from '../assets.tsx';
 import { Icon, type IconName } from '../ui/Icon.tsx';
 import { FailureState, refundNote } from '../ui/states.tsx';
-import { Dropdown, tip } from '../ui/controls.tsx';
+import { Dropdown, Slider, Toggle, tip } from '../ui/controls.tsx';
 import { MediaTile, AddTile } from '../ui/tiles.tsx';
 import { openMenu, openModal, openPopover, toast } from '../ui/layers.tsx';
 import { VideoPlayer, AudioPlayer } from '../player.tsx';
@@ -391,35 +392,103 @@ function Bar({ working, ready, action, onSend, children }: { working: boolean; r
 interface ParamGroup {
   label: string;
   value: string;
-  options: { value: string; label: string }[];
+  // 枚举取值列成一排小方块。note 是选项下的小字说明（模型的档位差异）。
+  options?: { value: string; label: string; note?: string }[];
+  // 连续取值（时长）不列按钮，画滑杆；value 是 'auto' 时滑杆不可用。
+  range?: { min: number; max: number };
+  // 有这一项就显示「时长由模型决定」开关（模型支持自动时长时才传）。
+  onAuto?: (auto: boolean) => void;
+  // 按钮摘要里这一组显示什么。不写就用选中的选项名。
+  display?: string;
+  // 只在浮层里出现、不进按钮摘要的组（模型：按钮旁边就是模型菜单）。
+  quiet?: boolean;
   onChange: (value: string) => void;
 }
 
-// 点开之后的那一页：每组参数一行小方块。它画在画布外面的浮层里，所以自己记着选了什么。
-function ParamSheet({ groups }: { groups: ParamGroup[] }) {
+// 参数里的一段自由输入（随机种子这类）。numeric 是纯数字。
+interface ParamText {
+  label: string;
+  value: string;
+  placeholder?: string;
+  numeric?: boolean;
+  onChange: (value: string) => void;
+}
+
+// 点开之后的那一页：每组参数一行小方块（时长是滑杆），文字参数一行输入框。它画在画布外面的浮层里，所以自己记着选了什么。
+function ParamSheet({ groups, texts = [] }: { groups: ParamGroup[]; texts?: ParamText[] }) {
   const [picked, setPicked] = useState(() => groups.map((group) => group.value));
+  // 滑杆的刻度：每 5 秒一格，从 0 画到上限。
+  const marks = (max: number) => Array.from({ length: Math.floor(max / 5) + 1 }, (_, i) => i * 5);
   return (
     <div className="popover-body cnode-sheet">
       {groups.map((group, index) => (
-        <div key={group.label} className="cnode-sheet-group" role="radiogroup" aria-label={group.label}>
+        <div key={group.label} className="cnode-sheet-group" role={group.range ? undefined : 'radiogroup'} aria-label={group.label}>
           <div className="popover-title">{group.label}</div>
-          <div className="cnode-opts">
-            {group.options.map((option) => (
-              <button
-                key={option.value}
-                type="button"
-                role="radio"
-                aria-checked={picked[index] === option.value}
-                className={`cnode-opt ${picked[index] === option.value ? 'active' : ''}`}
-                onClick={() => {
-                  setPicked((now) => now.map((value, n) => (n === index ? option.value : value)));
-                  group.onChange(option.value);
-                }}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
+          {group.range ? (
+            <>
+              <div className="duration-row">
+                <Slider
+                  label={group.label}
+                  min={group.range.min}
+                  max={group.range.max}
+                  marks={marks(group.range.max)}
+                  // 浮层不会跟着外面重画，滑杆的位置取本地的 picked，拖动才跟手。
+                  value={Number(picked[index]) || group.range.min}
+                  disabled={picked[index] === 'auto'}
+                  onChange={(value) => {
+                    setPicked((now) => now.map((v, n) => (n === index ? String(value) : v)));
+                    group.onChange(String(value));
+                  }}
+                />
+              </div>
+              {group.onAuto && (
+                <div className="cnode-auto">
+                  <Toggle
+                    checked={picked[index] === 'auto'}
+                    onChange={(auto) => {
+                      setPicked((now) => now.map((v, n) => (n === index ? (auto ? 'auto' : String(group.range!.min)) : v)));
+                      group.onAuto!(auto);
+                    }}
+                    label="时长由模型决定"
+                  />
+                  <span>由模型决定</span>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="cnode-opts">
+              {(group.options || []).map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={picked[index] === option.value}
+                  className={`cnode-opt ${picked[index] === option.value ? 'active' : ''}`}
+                  onClick={() => {
+                    setPicked((now) => now.map((value, n) => (n === index ? option.value : value)));
+                    group.onChange(option.value);
+                  }}
+                >
+                  {option.label}
+                  {option.note && <span className="cnode-opt-note">{option.note}</span>}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+      {texts.map((field) => (
+        <div key={field.label} className="cnode-sheet-group">
+          <div className="popover-title">{field.label}</div>
+          <input
+            className="cnode-text"
+            type="text"
+            inputMode={field.numeric ? 'numeric' : undefined}
+            value={field.value}
+            placeholder={field.placeholder}
+            aria-label={field.label}
+            onChange={(e) => field.onChange(field.numeric ? e.currentTarget.value.replace(/[^\d-]/g, '') : e.currentTarget.value)}
+          />
         </div>
       ))}
     </div>
@@ -427,13 +496,13 @@ function ParamSheet({ groups }: { groups: ParamGroup[] }) {
 }
 
 // 几个参数合成一项：按钮上把当前的值用圆点隔开写成一行（9:16 · 720p · 5 秒），点开一起改。
-function Params({ label, groups }: { label: string; groups: ParamGroup[] }) {
+function Params({ label, groups, texts = [] }: { label: string; groups: ParamGroup[]; texts?: ParamText[] }) {
   const ref = useRef<HTMLButtonElement>(null);
-  const shown = groups.filter((group) => group.options.length > 0);
-  if (!shown.length) return null;
-  const summary = shown.map((group) => group.options.find((option) => option.value === group.value)?.label || group.value);
+  const shown = groups.filter((group) => (group.options?.length ?? 0) > 0 || group.range);
+  if (!shown.length && !texts.length) return null;
+  const summary = [...shown.filter((group) => !group.quiet).map((group) => group.display || group.options?.find((option) => option.value === group.value)?.label || group.value), ...texts.filter((field) => field.value).map((field) => field.value)];
   return (
-    <button ref={ref} type="button" className="dropdown dropdown-tool cnode-param" aria-haspopup="dialog" aria-expanded="false" aria-label={`${label}：${summary.join('，')}`} onClick={() => openPopover(ref.current!, <ParamSheet groups={shown} />, { label })}>
+    <button ref={ref} type="button" className="dropdown dropdown-tool cnode-param" aria-haspopup="dialog" aria-expanded="false" aria-label={`${label}：${summary.join('，')}`} onClick={() => openPopover(ref.current!, <ParamSheet groups={shown} texts={texts} />, { label })}>
       <span className="dropdown-value">
         {summary.map((text, index) => (
           <span key={index}>{text}</span>
@@ -1038,7 +1107,9 @@ function Refs({ id, kind, model = '', limit = 0 }: { id: string; kind: NodeKind;
       if (value === 'text') return addInput(id, 'text');
       const onPick = (ref: Ref) => addInput(id, ref.kind, { upload: { url: ref.url, name: ref.name } });
       if (forImage) return openAssetPicker({ title: '添加参考图', kind: 'image', remaining: limit - used, onPick });
-      openAssetPicker({ title: '添加参考素材', limits: Object.fromEntries(kinds.map((item) => [item, MEDIA[item].max])), onPick });
+      // 视频节点的素材上限按模型来（2.5 是 30 图 + 10 视频 + 10 音频，其余 9/3/3）；工作流看它自己的规则，这里不设限。
+      const videoLimits = isFlowModel(model) ? undefined : refLimitsOf(specOf(model));
+      openAssetPicker({ title: '添加参考素材', limits: videoLimits ? { ...videoLimits } : Object.fromEntries(kinds.map((item) => [item, MEDIA[item].max])), onPick });
     };
     if (items.length === 1) return pick(items[0].value);
     openMenu(button, { label: '连接上游节点', items, onSelect: pick });
@@ -1170,16 +1241,46 @@ export function VideoNode({ id, data: raw, selected, dragging }: NodeProps) {
           <Prompt id={id} value={data.prompt} placeholder={promptHint(linked, data.selfFrame ? '描述接续动作与剧情，例如：主角转身上车，车辆向远方驶去' : '描述主体、动作、场景、运镜、光线与风格')} />
           {data.error && !data.busy && <p className="cnode-error">{data.error}</p>}
           <Bar working={working} ready={Boolean(data.prompt.trim()) || inputs.length > 0 || hasSelfRef} action="生成视频" onSend={() => generate(flow, id, snap)}>
+            <Dropdown
+              variant="tool"
+              chevron
+              label="生成方式"
+              value={data.mode || 'reference'}
+              options={[
+                { value: 'reference', label: '全能参考', note: '图、视频、音频都当参考，不连素材就是文生视频' },
+                ...(able.frames.includes('first_frame')
+                  ? [{ value: 'frames', label: able.frames.includes('last_frame') ? '首尾帧' : '图生视频', note: able.frames.includes('last_frame') ? '第一张图作首帧，第二张作尾帧' : '以图片为首帧' }]
+                  : []),
+                ...(able.editExtend
+                  ? [
+                      { value: 'edit', label: '编辑视频', note: '改原片的画面或声音，时长跟随原视频' },
+                      { value: 'extend', label: '延长视频', note: '从原片向前或向后接着拍' },
+                    ]
+                  : []),
+              ]}
+              onChange={(mode) => set(fitVideo({ ...data, mode: mode as VideoData['mode'] }))}
+            />
             <Dropdown variant="tool" chevron label="模型" value={data.model} options={models.map((m) => modelOption(m, modelName(m), modelHint(m)))} onChange={(model) => set(fitVideo({ ...data, model }))} />
             <Params
               label="参数"
               groups={[
                 { label: '比例', value: data.ratio, options: able.ratios.map((r) => ({ value: r, label: ratioLabel(r) })), onChange: (ratio) => set({ ratio }) },
                 { label: '分辨率', value: data.resolution, options: able.resolutions.map((r) => ({ value: r, label: r })), onChange: (resolution) => set({ resolution }) },
-                { label: '时长', value: String(data.duration), options: able.durations.map((d) => ({ value: String(d), label: `${d} 秒` })), onChange: (duration) => set({ duration: Number(duration) }) },
+                // 时长是一段连续取值：画滑杆，不把每秒一格列成几十个按钮；支持的模型（2.5）可以交给模型决定。
+                {
+                  label: '时长',
+                  value: data.durationAuto ? 'auto' : String(data.duration),
+                  display: data.durationAuto ? '自动' : `${data.duration} 秒`,
+                  range: { min: able.durations[0] ?? 4, max: able.durations[able.durations.length - 1] ?? 15 },
+                  onAuto: able.autoDuration ? (durationAuto) => set({ durationAuto }) : undefined,
+                  onChange: (duration) => set({ duration: Number(duration), durationAuto: false }),
+                },
                 { label: '段数', value: String(data.count || 1), options: VIDEO_COUNTS.map((n) => ({ value: String(n), label: `${n} 段` })), onChange: (count) => set({ count: Number(count) }) },
+                // 声音和种子只有支持的模型才有（和创作页的「更多」一致）：MiniMax 两样都没有。
+                ...(able.audio ? [{ label: '声音', value: String(data.generateAudio !== false), options: [{ value: 'true', label: '有声' }, { value: 'false', label: '无声' }], onChange: (value: string) => set({ generateAudio: value === 'true' }) }] : []),
                 ...flowGroups,
               ]}
+              texts={able.seed ? [{ label: '随机种子', value: data.seed || '', placeholder: '留空则每次随机', numeric: true, onChange: (seed) => set({ seed }) }] : []}
             />
           </Bar>
         </>
