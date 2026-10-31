@@ -1241,16 +1241,19 @@ export function VideoNode({ id, data: raw, selected, dragging }: NodeProps) {
   const set = (patch: Partial<VideoData>) => flow.updateNodeData(id, patch);
   // 切生成方式时把连线用途一并对齐，输入区的小方块标签跟着变（和创作页选首尾帧出现两个槽是一个意思）：
   // 切到首尾帧，图片连线按顺序标成首帧、尾帧；切回全能参考，把标记还原成参考图。编辑/延长只看视频连线，不用动。
-  const setMode = (mode: VideoData['mode']) => {
+  const alignEdges = (mode: VideoData['mode'], model = data.model) => {
     const images = inputs.filter((i) => i.link.kind === 'image');
     if (mode === 'frames') {
       for (const [index, { edgeId, link }] of images.entries()) {
-        const role: FrameRole = index === 0 && able.frames.includes('first_frame') ? 'first' : index === 1 && hasLastFrame(data.model) ? 'last' : 'reference';
+        const role: FrameRole = index === 0 && able.frames.includes('first_frame') ? 'first' : index === 1 && hasLastFrame(model) ? 'last' : 'reference';
         if ((link.role || 'reference') !== role) flow.updateEdgeData(edgeId, { role });
       }
     } else if (mode === 'reference') {
       for (const { edgeId, link } of images) if (link.role && link.role !== 'reference') flow.updateEdgeData(edgeId, { role: 'reference' });
     }
+  };
+  const setMode = (mode: VideoData['mode']) => {
+    alignEdges(mode);
     set(fitVideo({ ...data, mode }));
   };
   // 模型是工作流时，它自己的枚举、开关参数（模式、风格预设…）也放进「参数」：键就是规则里的参数名。分辨率、时长用节点上直接的那两个。
@@ -1300,7 +1303,7 @@ export function VideoNode({ id, data: raw, selected, dragging }: NodeProps) {
               ]}
               onChange={(mode) => setMode(mode as VideoData['mode'])}
             />
-            <Dropdown variant="tool" chevron label="模型" value={data.model} options={models.map((m) => modelOption(m, modelName(m), modelHint(m)))} onChange={(model) => set(fitVideo({ ...data, model }))} />
+            <Dropdown variant="tool" chevron label="模型" value={data.model} options={models.map((m) => modelOption(m, modelName(m), modelHint(m)))} onChange={(model) => { const next = fitVideo({ ...data, model }); alignEdges(next.mode || 'reference', model); set(next); }} />
             <Params
               label="参数"
               groups={[
