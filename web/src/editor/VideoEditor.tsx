@@ -7,27 +7,37 @@ import { openModal, toast } from '../ui/layers.tsx';
 import { fmtTime } from '../format.ts';
 import { uploadLocalFile } from '../media.ts';
 import { trimSegments, type Segment } from './ffmpeg.ts';
+import type { Made } from '../canvas/edit.tsx';
 
-interface EditorProps {
+// 剪出来的片段交给谁：
+//   onMade — 画布在用，拿这些片段在当前节点右边生成新的视频节点，产物能继续参与生成流程；
+//   reload — 素材库、创作记录在用的。落盘之后刷新列表就行。
+export interface EditorOptions {
+  onMade?: (made: Made[]) => void;
+  reload?: () => void;
+}
+
+interface EditorProps extends EditorOptions {
   url: string;
   name: string;
-  reload: () => void;
+  onClose: () => void;
 }
 
 type DragTarget = 'start' | 'end' | 'play' | null;
 
-function openVideoEditor(url: string, name: string, reload: () => void) {
-  openModal({
+function openVideoEditor(url: string, name: string, opts: EditorOptions = {}) {
+  const modal = openModal({
     title: '视频剪辑',
     subtitle: name,
     size: 'lg',
-    content: <VideoEditor url={url} name={name} reload={reload} />,
+    content: <VideoEditor url={url} name={name} {...opts} onClose={() => modal.close()} />,
   });
+  return modal;
 }
 
 export { openVideoEditor };
 
-function VideoEditor({ url, name, reload }: EditorProps) {
+function VideoEditor({ url, name, onMade, reload, onClose }: EditorProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
   const drag = useRef<DragTarget>(null);
@@ -129,18 +139,29 @@ function VideoEditor({ url, name, reload }: EditorProps) {
         reencode,
         onProgress: (index, ratio) => setProgress({ index, ratio }),
       });
-      let ok = 0;
+      const made: Made[] = [];
       for (const { segment, blob } of results) {
         const f = new File([blob], segment.name, { type: 'video/mp4' });
         try {
-          await uploadLocalFile(f, 'video', () => {});
-          ok += 1;
+          const saved = await uploadLocalFile(f, 'video', () => {});
+          made.push({ url: saved.url, name: saved.name || segment.name });
         } catch (err) {
           toast(`「${segment.name}」上传失败：${(err as Error).message}`, 'error', 6000);
         }
       }
-      toast(`剪辑完成，已保存 ${ok}/${results.length} 段到素材库`, ok ? 'success' : 'error', 6000);
-      if (ok) reload();
+      if (!made.length) {
+        toast('剪辑失败：没有片段保存成功', 'error', 7000);
+        return;
+      }
+      if (onMade) {
+        // 画布里剪的：片段变成新的视频节点摆在右边，做完就把窗口关掉，让看到的是画布上的结果。
+        onMade(made);
+        toast(`剪辑完成，${made.length} 段已放到画布上`, 'success', 5000);
+        onClose();
+      } else {
+        toast(`剪辑完成，已保存 ${made.length}/${results.length} 段到素材库`, 'success', 6000);
+        reload?.();
+      }
     } catch (err) {
       toast(`剪辑失败：${(err as Error).message}`, 'error', 7000);
     } finally {
@@ -224,7 +245,7 @@ function VideoEditor({ url, name, reload }: EditorProps) {
           </span>
         )}
         <button className="btn btn-primary" type="button" disabled={busy || !segments.length} onClick={exportAll}>
-          {busy ? '处理中…' : `导出 ${segments.length} 段`}
+          {busy ? '处理中…' : onMade ? `导出 ${segments.length} 段到画布` : `导出 ${segments.length} 段`}
         </button>
       </div>
     </div>

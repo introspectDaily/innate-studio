@@ -542,7 +542,7 @@ function Detail({ item, close, nav }: { item: HistoryItem; close: () => void; na
       )}
       {leaveTo('复用参数', reuse)}
       {done(item) && item.kind === 'video' && item.savedLocally && (
-        <button className="btn" type="button" onClick={() => openVideoEditor(item.mediaUrl!, nameOf(item), () => loadHistory())}>
+        <button className="btn" type="button" onClick={() => openVideoEditor(item.mediaUrl!, nameOf(item), { reload: () => loadHistory() })}>
           剪辑
         </button>
       )}

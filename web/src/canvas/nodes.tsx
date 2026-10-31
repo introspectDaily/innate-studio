@@ -29,14 +29,15 @@ import { reducedMotion } from '../ui/motion.ts';
 // addInput：在某个节点左边加一个节点并连进它，extra 是新节点一出来就带着的内容（上传的文件）。
 // ungroup：解散一个分组（只去掉框，里面的节点留着）。saveWorkflow：把一个分组存成工作流。
 // unstack：把一叠摊开；只给一个成员就只取回它。
-// addBeside：把几张做好的图（裁剪、切分、截帧的结果）各变成一个图片节点，摆在某个节点右边；columns 是一行摆几个。
+// addBeside：把几份做好的产物（裁剪、切分、截帧、剪辑的结果）各变成一个节点，摆在某个节点右边；columns 是一行摆几个。
+// 产物是图就是图节点，是视频就把 kind 传 'video'，这样切出来的片段还能接着往下用。
 export const CanvasActions = createContext<{
   snap: () => void;
   addInput: (targetId: string, kind: NodeKind, extra?: Record<string, unknown>, role?: FrameRole) => void;
   ungroup: (groupId: string) => void;
   saveWorkflow: (groupId: string) => void;
   unstack: (stackId: string, memberId?: string) => void;
-  addBeside: (sourceId: string, made: Made[], columns?: number) => void;
+  addBeside: (sourceId: string, made: Made[], columns?: number, kind?: NodeKind) => void;
   // addNodeBeside：在某个节点右边加一个同类的空节点，返回它的 id（扩图的结果放进它）。continueVideo：接着一段视频往后拍，frame 是它的最后一帧。
   addNodeBeside: (sourceId: string, data: Record<string, unknown>) => string;
   continueVideo: (sourceId: string, frame: Made, targetAt?: { x: number; y: number }) => void;
@@ -629,7 +630,7 @@ function NodeTools({ id, kind, data, onUpload }: { id: string; kind: Kind; data:
   const place = data.inPlace ?? canvasPlace() === 'here';
   const items = [
     ...(local && kind === 'image' ? [{ value: 'crop', label: '裁剪' }, { value: 'grid', label: '切成宫格…' }, ...(ratios.length ? [{ value: 'outpaint', label: '扩图…' }] : [])] : []),
-    ...(local && kind === 'video' ? [{ value: 'extend', label: '延长' }, { value: 'frame', label: '截取当前帧' }, { value: 'first', label: '截取首帧' }, { value: 'last', label: '截取尾帧' }] : []),
+    ...(local && kind === 'video' ? [{ value: 'extend', label: '延长' }, { value: 'trim', label: '剪辑…' }, { value: 'frame', label: '截取当前帧' }, { value: 'first', label: '截取首帧' }, { value: 'last', label: '截取尾帧' }] : []),
     ...(file ? [{ value: 'download', label: '下载' }] : []),
     ...(kept.length ? [{ value: 'kept', label: '历史版本…', note: String(kept.length) }] : []),
     { value: 'place', label: `再次生成：${place ? '就地替换' : '另开节点'}…` },
@@ -640,6 +641,16 @@ function NodeTools({ id, kind, data, onUpload }: { id: string; kind: Kind; data:
     grid: () => submenu(moreButton.current, '切成宫格', [2, 3, 4].map((n) => ({ value: String(n), label: `${n}×${n}` })), (n) => make('切分', () => splitGrid(file!.url, Number(n), file!.name), Number(n))),
     outpaint: () => submenu(moreButton.current, '扩图成', ratios.map((r) => ({ value: r, label: r })), outpaint),
     extend,
+    // 剪辑：在浏览器里把这段视频切成几段，每段变成一个新的视频节点，摆在这个节点右边。
+    // 剪辑器连着 ffmpeg.wasm，用到的时候才加载，不占画布打开时的那一口气。
+    trim: async () => {
+      try {
+        const { openVideoEditor } = await import('../editor/VideoEditor.tsx');
+        openVideoEditor(file!.url, file!.name, { onMade: (made) => addBeside(id, made, 1, 'video') });
+      } catch (err) {
+        toast(`剪辑加载失败：${(err as Error).message}`, 'error', 6000);
+      }
+    },
     frame: () => make('截帧', async () => [await grabFrame(file!.url, playhead(), `${file!.name}-截帧`)]),
     first: () => make('截帧', async () => [await grabFrame(file!.url, 0, `${file!.name}-首帧`)]),
     last: () => make('截帧', async () => [await grabFrame(file!.url, 'last', `${file!.name}-尾帧`)]),

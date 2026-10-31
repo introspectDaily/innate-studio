@@ -17,6 +17,44 @@ const LOCAL_WASM = '/ffmpeg/ffmpeg-core.wasm';
 // 兜底 CDN（本地文件缺失或加载失败时再用，需要联网）。
 const CDN_BASE = 'https://unpkg.com/@ffmpeg/core@0.12.10/dist/umd';
 
+// 核心文件的版本号，构建时由 vite 从 @ffmpeg/core/package.json 注入。
+declare const __FFMPEG_CORE_VERSION__: string;
+const CACHE_NAME = `ffmpeg-core-${__FFMPEG_CORE_VERSION__}`;
+
+// 32MB 的核心文件每次都从服务端取太浪费，第一次拿到之后就存在浏览器自己的缓存里（Cache Storage），
+// 之后直接从本地读。缓存名带着 core 的版本号，升级版本就自动换一套，不会接着用对不上的旧核心。
+// 浏览器不支持（或配额不够）就退回原来的直接取，功能不受影响。
+async function coreBlobURL(url: string, type: string): Promise<string> {
+  const direct = () => toBlobURL(url, type);
+  if (typeof caches === 'undefined') return direct();
+  try {
+    const store = await caches.open(CACHE_NAME);
+    const cached = await store.match(url);
+    if (cached) return URL.createObjectURL(await cached.blob());
+    const res = await fetch(url);
+    if (!res.ok) return direct();
+    try {
+      await store.put(url, res.clone());
+    } catch {
+      // 放不下就不缓存了，这一趟照常用。
+    }
+    return URL.createObjectURL(await res.blob());
+  } catch {
+    return direct();
+  }
+}
+
+// 换了 core 版本之后，把上一版留下的缓存删掉，别让 32MB 一份份堆在用户硬盘上。
+async function dropStaleCores() {
+  if (typeof caches === 'undefined') return;
+  try {
+    const names = await caches.keys();
+    await Promise.all(names.filter((name) => name.startsWith('ffmpeg-core-') && name !== CACHE_NAME).map((name) => caches.delete(name)));
+  } catch {
+    // 清不掉也不影响使用。
+  }
+}
+
 let ffmpeg: FFmpeg | null = null;
 let loadPromise: Promise<FFmpeg> | null = null;
 
@@ -43,12 +81,14 @@ export function getFFmpeg(): Promise<FFmpeg> {
     const tryLoad = async (coreURL: string, wasmURL: string) =>
       instance.load({ coreURL, wasmURL });
     try {
-      await tryLoad(await toBlobURL(LOCAL_CORE, 'text/javascript'), await toBlobURL(LOCAL_WASM, 'application/wasm'));
+      // 本地这份优先：从 /ffmpeg/ 取，第二次开始读的就是浏览器自己缓存的那份。
+      await tryLoad(await coreBlobURL(LOCAL_CORE, 'text/javascript'), await coreBlobURL(LOCAL_WASM, 'application/wasm'));
     } catch {
-      // 本地 core 缺失（例如忘了复制文件）：回退到 CDN。
+      // 本地没有（例如忘了构建）或者坏了：回退到 CDN。
       await tryLoad(await toBlobURL(`${CDN_BASE}/ffmpeg-core.js`, 'text/javascript'), await toBlobURL(`${CDN_BASE}/ffmpeg-core.wasm`, 'application/wasm'));
     }
     ffmpeg = instance;
+    await dropStaleCores();
     return instance;
   })();
   return loadPromise;

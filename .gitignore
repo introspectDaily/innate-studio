@@ -7,5 +7,9 @@ test/.tmp/
 # 依赖和页面的构建结果
 node_modules/
 web/dist/
+# ffmpeg.wasm 的核心（32MB 二进制）：来自 @ffmpeg/core 依赖，由 vite 在构建前自动复制，不进版本库
+web/public/ffmpeg/
 .workbuddy
 .agents/skills/innate-studio
+cli/innate.mjs
+.env

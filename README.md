@@ -284,7 +284,7 @@ innate --help
 
 接入三步：
 
-1. **建令牌**：多人模式在「设置 → Agent Keys」创建，本机模式用 `pnpm user token add [--scope read|write]`。令牌形如 `isk_…`，绑定到某个用户（本机模式为本地 Agent），空间隔离、积分、角色全部继承。
+1. **建令牌**：在「设置 → Agent Keys」创建（本机模式、多人模式都能在界面上建），也可以用命令行 `pnpm user token add [--scope read|write]`。令牌形如 `isk_…`，多人模式下绑定到你的账号（空间隔离、积分、角色全部继承），本机模式挂「本地 Agent」身份。
 2. **记住一次**：`innate config set --key isk_…`（写入 `~/.innate/config.json`，权限 600）。服务地址会自动发现（服务启动时把监听地址写进数据目录的 `server.json`），改了 `PORT` 不用另外配置；临时覆盖用 `--api-url` 或环境变量。`scope=read` 的令牌只能读，生成/上传需 `scope=write`。
 3. **调用与拿结果**：例如 `innate generate image --model seedream-5.0-pro --prompt "猫" --wait`、`innate canvas grid --ids r1,r2,r3 --cols 3`（一条命令完成建画布 + 网格精确摆放）。`--wait` 会调 `POST /api/history/<id>/refresh?wait=60` 阻塞等到完成，返回里的 `localPath` 是结果在本机的绝对路径，同一台机器可直接读取。
 

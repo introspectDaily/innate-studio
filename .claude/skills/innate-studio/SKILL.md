@@ -19,7 +19,7 @@ innate --help                          # 装完就能在任何目录直接用
 鉴权（Access Token / Agent API Key，`isk_` 开头）记住一次就行；服务地址会自动发现，改了 `PORT` 也不用管：
 
 ```bash
-innate config set --key isk_xxxxxxxxxxxxxxxx   # 多人模式：前端「设置 → Agent Keys」创建；本机模式：pnpm user token add
+innate config set --key isk_xxxxxxxxxxxxxxxx   # 令牌在前端「设置 → Agent Keys」创建，本机模式、多人模式都能在界面上建
 innate config show                             # 看当前记住的地址与令牌（令牌只显示前后几位）
 innate doctor                                  # 连不上就先跑这个：报地址、连通性、身份和建议
 ```

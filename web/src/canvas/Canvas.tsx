@@ -544,19 +544,24 @@ function Board({ id, onExit }: { id: string; onExit: () => void }) {
   );
   const seed = () => ({ form: composer.form, image: composer.studio.image, speech: composer.studio.speech });
 
-  // 把几张做好的图各变成一个图片节点，摆在来源节点的右边，columns 个一行。
+  // 把做好的几份产物各变成一个节点，摆在来源节点的右边，columns 个一行。
+  // 默认是图片节点：裁剪、切宫格、截帧的产物都是图。
+  // 视频剪辑的产物要变的是视频节点（kind 传 'video'），这时生成参数照抄来源节点——切出来的片段
+  // 往往还要接着往下用（当参考视频、继续延长），用同一套参数才对得上。
   const addBeside = useCallback(
-    (sourceId: string, made: { url: string; name: string }[], columns = 1) => {
+    (sourceId: string, made: { url: string; name: string }[], columns = 1, kind: NodeKind = 'image') => {
       const source = flow.getNode(sourceId);
       if (!source || !made.length) return;
       const { x, y, stepX, stepY } = spotBeside(source, columns, Math.ceil(made.length / columns));
       snap();
+      const copied = Object.fromEntries(['model', 'ratio', 'resolution', 'duration'].filter((key) => source.data[key] !== undefined).map((key) => [key, source.data[key]]));
       const fresh = numbered(
-        made.map((item, index) => ({ id: crypto.randomUUID(), type: 'image', position: { x: x + (index % columns) * stepX, y: y + Math.floor(index / columns) * stepY }, data: { ...newNodeData('image', seed()), upload: item }, selected: index === 0 }) as Node),
+        made.map((item, index) => ({ id: crypto.randomUUID(), type: kind, position: { x: x + (index % columns) * stepX, y: y + Math.floor(index / columns) * stepY }, data: { ...newNodeData(kind, seed()), ...(kind === 'video' ? copied : {}), upload: item }, selected: index === 0 }) as Node),
         flow.getNodes(),
       );
       setNodes((items) => [...items.map((node) => (node.selected ? { ...node, selected: false } : node)), ...fresh]);
-      reveal(fresh[0].position, BOX_HEIGHT);
+      // 视频框是 16:9，比图片宽，按实际的宽度去揭示位置。
+      reveal(fresh[0].position, nodeWidth(kind, fresh[0].data));
     },
     [flow, reveal, setNodes, snap, spotBeside],
   );

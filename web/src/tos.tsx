@@ -270,7 +270,7 @@ function LocalMaterialCard({ item, status, reload }: { item: LocalMaterial; stat
         ) : (
           <button className="btn btn-sm" type="button" disabled={publishing || (!status?.preferred)} onClick={publish}>{publishing ? '发布中…' : latest ? '校验公网链接' : '发布公网'}</button>
         )}
-        {item.kind === 'video' && <button className="btn btn-sm" type="button" onClick={() => openVideoEditor(item.url, item.name, reload)}>剪辑</button>}
+        {item.kind === 'video' && <button className="btn btn-sm" type="button" onClick={() => openVideoEditor(item.url, item.name, { reload })}>剪辑</button>}
         {manage && <button className="btn btn-sm" type="button" onClick={rename}>重命名</button>}
         {manage && <button className="btn btn-sm btn-danger" type="button" onClick={remove}>删除</button>}
       </div>

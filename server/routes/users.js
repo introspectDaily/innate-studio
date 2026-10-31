@@ -60,20 +60,16 @@ route('DELETE', /^\/api\/users\/([\w-]+)$/, async ({ params, user: me }) => {
 // ---------- Agent API Keys（Access Tokens）----------
 // 给非浏览器客户端（Codex / Claude Code / curl，走 SKILL.md）用的长效令牌。多人模式下绑定到当前登录用户；
 // 本机模式没有用户，请用命令行 `pnpm token` 创建。scope=read 的 key 只能读，scope=write 才能生成/上传。
+// 本机模式没有账号，令牌就挂在「本地 Agent」这个身份上（userId 为 null），照样能在界面上管理。
 route('POST', /^\/api\/agent-keys$/, async ({ req, user }) => {
-  if (!user) throw new HttpError(400, 'local_mode', '本机模式请在命令行用 `pnpm token add` 创建令牌');
   const { name, scope } = await readJsonBody(req);
-  const key = createApiKey({ userId: user.id, name, scope });
+  const key = createApiKey({ userId: user?.id ?? null, name, scope });
   return { id: key.id, name: key.name, scope: key.scope, prefix: key.prefix, token: key.token, createdAt: key.createdAt };
 });
 
-route('GET', /^\/api\/agent-keys$/, async ({ user }) => {
-  if (!user) throw new HttpError(400, 'local_mode', '本机模式请在命令行用 `pnpm token list` 查看令牌');
-  return { items: listApiKeys(user.id) };
-});
+route('GET', /^\/api\/agent-keys$/, async ({ user }) => ({ items: listApiKeys(user?.id ?? null) }));
 
 route('DELETE', /^\/api\/agent-keys\/([\w-]+)$/, async ({ params, user }) => {
-  if (!user) throw new HttpError(400, 'local_mode', '本机模式请在命令行用 `pnpm token revoke <id>` 吊销令牌');
-  revokeApiKey(user.id, params[0]);
+  revokeApiKey(user?.id ?? null, params[0]);
   return null;
 });
