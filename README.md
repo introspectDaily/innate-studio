@@ -117,6 +117,7 @@ Innate Studio centers on **Volcengine** while integrating **MiniMax** and **AiHu
 
 ### Prerequisites
 - **Node.js**: `>= 22.18` (the server runs the shared TypeScript model definitions `shared/models.ts` directly via native Node.js TypeScript support)
+- **pnpm**: `>= 10` (the project pins pnpm 11; pnpm shares a content-addressable store to save disk space)
 
 ### Installation & Launch (Local Mode)
 
@@ -126,19 +127,19 @@ git clone https://github.com/realruian/innate-studio.git
 cd innate-studio
 
 # 2. Install dependencies, build the frontend, and start the server
-npm install
-npm start
+pnpm install
+pnpm start
 ```
 
 Once started, open **`http://127.0.0.1:5178`** in your browser. Click **Admin** in the bottom-left corner to configure your provider API keys.
 
 > 💡 **Environment Variable Injection (Stateless Keys)**: If you prefer not to persist API keys in `data/config.json`, pass them via environment variables at launch:
 > ```bash
-> ARK_API_KEY=... DOUBAO_SPEECH_API_KEY=... MINIMAX_CN_API_KEY=... AIHUBMIX_API_KEY=... npm start
+> ARK_API_KEY=... DOUBAO_SPEECH_API_KEY=... MINIMAX_CN_API_KEY=... AIHUBMIX_API_KEY=... pnpm start
 > ```
 > To customize the listening port or data directory:
 > ```bash
-> PORT=5180 INNATE_DATA_DIR=/path/to/data npm start
+> PORT=5180 INNATE_DATA_DIR=/path/to/data pnpm start
 > ```
 
 ---
@@ -147,25 +148,25 @@ Once started, open **`http://127.0.0.1:5178`** in your browser. Click **Admin** 
 
 When at least one user account exists in the data directory, the server automatically switches from **Local Mode** to **Team Mode**, requiring authentication to access the workbench.
 
-### Account & Credit Management CLI (`npm run user`)
+### Account & Credit Management CLI (`pnpm user`)
 
-> ⚠️ **Note**: Stop the running server before modifying accounts via `npm run user`, or ensure account state stays synchronized. The initial administrator account must be created via the CLI.
+> ⚠️ **Note**: Stop the running server before modifying accounts via `pnpm user`, or ensure account state stays synchronized. The initial administrator account must be created via the CLI.
 
 ```bash
 # Create the first admin account and migrate existing local-mode data to this user
-npm run user -- add alice --admin --with-local-data
+pnpm user add alice --admin --with-local-data
 
 # Create a regular member account (specify a password, or omit to generate a one-time initial password)
-npm run user -- add bob --password <password>
+pnpm user add bob --password <password>
 
 # Grant credits to a member (100 credits = 1 CNY; negative values deduct credits)
-npm run user -- grant bob 5000
+pnpm user grant bob 5000
 
 # Reset a member's password
-npm run user -- reset bob
+pnpm user reset bob
 
 # List all accounts, statuses, and credit balances
-npm run user -- list
+pnpm user list
 ```
 
 Once logged in, administrators can also create members, grant credits, reset passwords, or deactivate accounts directly from **Admin ➔ Members** in the bottom-left corner, as well as inspect total team credits and monthly usage.
@@ -243,23 +244,23 @@ All application state is persisted inside `data/` (customizable via `INNATE_DATA
 
 ```bash
 # Start Vite frontend HMR dev server (proxies API requests to 127.0.0.1:5178)
-npm run dev
+pnpm dev
 
 # Run TypeScript type checking only
-npm run typecheck
+pnpm typecheck
 
 # Run the full automated test suite (typecheck, model & billing unit tests, canvas logic, API & team mode tests, CSS lint)
-npm test
+pnpm test
 
 # Start a standalone mock environment on port 5179 (no real API keys or token spend required)
-npm run dev:mock
+pnpm dev:mock
 
 # Run the automated light/dark full-page UI walkthrough script
-npm run walkthrough
+pnpm walkthrough
 ```
 
 ### Visual Walkthrough & Design System
-This project follows strict UI and interaction guidelines (color tokens, 6-step type scale, spacing scale, and custom-drawn native-free controls). Please read **[DESIGN.md](DESIGN.md)** before modifying UI components or styles, and ensure `npm test` passes before committing.
+This project follows strict UI and interaction guidelines (color tokens, 6-step type scale, spacing scale, and custom-drawn native-free controls). Please read **[DESIGN.md](DESIGN.md)** before modifying UI components or styles, and ensure `pnpm test` passes before committing.
 
 ---
 

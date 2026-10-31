@@ -117,6 +117,7 @@ Innate Studio 以**火山引擎**为主线，同时接入 **MiniMax** 与 **AiHu
 
 ### 运行环境
 - **Node.js**：`>= 22.18`（服务端直接使用 Node.js 原生支持运行共享的 TypeScript 模型定义文件 `shared/models.ts`）
+- **pnpm**：`>= 10`（项目固定使用 pnpm 11；pnpm 通过内容寻址仓库共享依赖，更节省磁盘空间）
 
 ### 安装与启动（本机模式）
 
@@ -126,19 +127,19 @@ git clone https://github.com/realruian/innate-studio.git
 cd innate-studio
 
 # 2. 安装依赖、构建前端并启动服务
-npm install
-npm start
+pnpm install
+pnpm start
 ```
 
 启动后在浏览器打开：**`http://127.0.0.1:5178`**。点击左下角「管理」即可填写各平台 API Key。
 
 > 💡 **环境变量注入（无痕模式）**：若不想在 `data/config.json` 中落盘保存密钥，可通过环境变量直接启动：
 > ```bash
-> ARK_API_KEY=... DOUBAO_SPEECH_API_KEY=... MINIMAX_CN_API_KEY=... AIHUBMIX_API_KEY=... npm start
+> ARK_API_KEY=... DOUBAO_SPEECH_API_KEY=... MINIMAX_CN_API_KEY=... AIHUBMIX_API_KEY=... pnpm start
 > ```
 > 如需修改监听端口或数据目录：
 > ```bash
-> PORT=5180 INNATE_DATA_DIR=/path/to/data npm start
+> PORT=5180 INNATE_DATA_DIR=/path/to/data pnpm start
 > ```
 
 ---
@@ -147,25 +148,25 @@ npm start
 
 当数据目录中存在至少一个账号时，服务会自动从「本机模式」切换为「多人模式」，要求登录后访问。
 
-### 账号与积分管理 CLI (`npm run user`)
+### 账号与积分管理 CLI (`pnpm user`)
 
-> ⚠️ **注意**：在执行 `npm run user` 修改账号前请先停止正在运行的服务，或确保修改后账号状态同步。首个管理员账号只能通过命令行创建。
+> ⚠️ **注意**：在执行 `pnpm user` 修改账号前请先停止正在运行的服务，或确保修改后账号状态同步。首个管理员账号只能通过命令行创建。
 
 ```bash
 # 创建首个管理员账号，并将原本机模式下的数据迁移至该账号名下
-npm run user -- add alice --admin --with-local-data
+pnpm user add alice --admin --with-local-data
 
 # 创建普通成员账号（可指定密码，不指定则随机生成一次性初始密码）
-npm run user -- add bob --password <密码>
+pnpm user add bob --password <密码>
 
 # 为成员发放积分（100 积分 = 1 元，支持负数扣回）
-npm run user -- grant bob 5000
+pnpm user grant bob 5000
 
 # 重置成员密码
-npm run user -- reset bob
+pnpm user reset bob
 
 # 查看所有账号状态与积分余额
-npm run user -- list
+pnpm user list
 ```
 
 管理员登录后，也可直接在界面左下角「管理 ➔ 成员」中新建成员、发放积分、重置密码或停用账号，并查看团队总积分与当月总用量。
@@ -243,23 +244,23 @@ flowchart TD
 
 ```bash
 # 启动 Vite 前端热更新开发服务器（API 代理至 127.0.0.1:5178）
-npm run dev
+pnpm dev
 
 # 仅运行 TypeScript 类型检查
-npm run typecheck
+pnpm typecheck
 
 # 运行全套自动化测试（含类型检查、模型与计费单测、画布逻辑、接口与多人模式测试、CSS 规范检查）
-npm test
+pnpm test
 
 # 启动带本地 Mock 服务的独立测试环境（端口 5179，无需真实 API Key 与 Token 消耗）
-npm run dev:mock
+pnpm dev:mock
 
 # 运行深浅双主题全页面 UI 自动化走查脚本
-npm run walkthrough
+pnpm walkthrough
 ```
 
 ### 视觉走查与设计规范
-本项目遵循严格的界面视觉与交互规范（色彩 Token、六档字号阶梯、间距阶梯、自绘无原生控件体系）。修改界面组件或样式前请务必阅读 **[DESIGN.md](DESIGN.md)**，提交前请确保 `npm test` 全部通过。
+本项目遵循严格的界面视觉与交互规范（色彩 Token、六档字号阶梯、间距阶梯、自绘无原生控件体系）。修改界面组件或样式前请务必阅读 **[DESIGN.md](DESIGN.md)**，提交前请确保 `pnpm test` 全部通过。
 
 ---
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 // 在命令行里管账号。第一个管理员只能在这里建：建了第一个账号，服务就进入多人模式，要登录才能用。
-//   npm run user -- add <名称> [--admin] [--with-local-data]    建账号，密码随机生成，只在这里显示一次
-//   npm run user -- reset <名称>                                重置密码
-//   npm run user -- list                                        列出账号
+//   pnpm user add <名称> [--admin] [--with-local-data]    建账号，密码随机生成，只在这里显示一次
+//   pnpm user reset <名称>                                重置密码
+//   pnpm user list                                        列出账号
 // --with-local-data：把数据目录里原来本机模式的数据（生成记录、画布、角色、技能、工作流和文件）搬给这个账号。
 // 运行前先停掉服务，改完再启动：服务运行时账号在它的内存里，这里改的会被它覆盖。
 
@@ -64,7 +64,7 @@ try {
     for (const user of allUsers()) console.log(`${user.role === 'admin' ? '管理员' : '成员  '}  ${user.name}${user.disabled ? '（已停用）' : ''}  积分: ${balanceOf(user.id)}`);
     if (!allUsers().length) console.log('还没有账号，服务处于本机模式。');
   } else {
-    console.log('用法：\n  npm run user -- add <名称> [--admin] [--with-local-data] [--password <密码>]\n  npm run user -- reset <名称> [--password <密码>]\n  npm run user -- grant <名称> <积分数>\n  npm run user -- list');
+    console.log('用法：\n  pnpm user add <名称> [--admin] [--with-local-data] [--password <密码>]\n  pnpm user reset <名称> [--password <密码>]\n  pnpm user grant <名称> <积分数>\n  pnpm user list');
     process.exit(1);
   }
 } catch (err) {

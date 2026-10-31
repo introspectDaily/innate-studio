@@ -6,8 +6,8 @@
 //   ark.js 调用火山方舟    speech.js 豆包语音    billing.js 费用中心
 //   media.js 本机文件    tasks.js 生成记录的轮询和落盘    thumbs.js 缩略图
 //   auth.js 账号和登录    spaces.js 每个请求用哪一份数据    routes/ 各组接口
-// 两种用法：本机模式（默认）不用登录，只接受本机页面的请求；建了账号（npm run user）就是多人模式，要登录，各人的数据分开。
-// 服务本身不依赖第三方包。页面是 web/ 里的 React 源码，用 npm run build 构建到 web/dist 之后由这里托管。
+// 两种用法：本机模式（默认）不用登录，只接受本机页面的请求；建了账号（pnpm user）就是多人模式，要登录，各人的数据分开。
+// 服务本身不依赖第三方包。页面是 web/ 里的 React 源码，用 pnpm build 构建到 web/dist 之后由这里托管。
 
 import http from 'node:http';
 import fs from 'node:fs';
@@ -116,7 +116,7 @@ server.listen(PORT, HOST, () => {
   console.log(`Innate Studio 已启动：http://${HOST}:${PORT}`);
   console.log(`数据目录：${DATA_DIR}`);
   if (isHosted()) console.log(`多人模式：${allUsers().length} 个账号，需要登录。`);
-  if (!fs.existsSync(path.join(PUBLIC_DIR, 'index.html'))) console.log('还没有构建页面，打开会是空的。先运行 npm run build（npm start 会自动构建）。');
+  if (!fs.existsSync(path.join(PUBLIC_DIR, 'index.html'))) console.log('还没有构建页面，打开会是空的。先运行 pnpm build（pnpm start 会自动构建）。');
   if (!apiKey()) console.log(`还没有设置 ${ARK.label} 的 API Key，打开页面后在「管理」里填写。`);
   startPolling();
 });

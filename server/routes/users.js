@@ -29,7 +29,7 @@ route('PUT', /^\/api\/me\/password$/, async ({ req, user }) => {
 route('GET', /^\/api\/users$/, async () => ({ items: allUsers().map((user) => ({ ...userView(user), credits: balanceOf(user.id), monthUsed: monthUsed(user.id) })) }), 'admin');
 
 // 建账号、重置密码时，密码由这里随机生成，在返回里给管理员看这一次，之后查不到。
-// 这里建的都是成员。管理员只能在服务器的命令行里建（npm run user -- add <名称> --admin），页面上给不了。
+// 这里建的都是成员。管理员只能在服务器的命令行里建（pnpm user add <名称> --admin），页面上给不了。
 route('POST', /^\/api\/users$/, async ({ req }) => {
   const { name } = await readJsonBody(req);
   const password = newPassword();

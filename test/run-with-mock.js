@@ -1,5 +1,5 @@
 // 用模拟接口启动一份独立的应用，方便调界面：不花钱，也不碰真实的 data/。
-// 用法：npm run dev:mock
+// 用法：pnpm dev:mock
 // 可选 MOCK_SAMPLE=/path/to/video.mp4、MOCK_IMAGE=/path/to/image.jpg、MOCK_AUDIO=/path/to/audio.mp3，让生成结果是能看能听的真实文件。
 // 可选 MOCK_TASK_SECONDS：模拟的任务要多少秒才处理完。整体走查要在两分钟内跑完，跑它时调小一点。
 

@@ -1,8 +1,8 @@
 // 整体走查：把每个页面、弹窗、浮层都打开一遍，逐个状态做一致性检查并截图。
 // 改了任何界面代码之后都要跑，深色、浅色各一遍。
 //
-// 前提：npm run dev:mock 已在运行（http://127.0.0.1:5179，接的是模拟接口）。它启动时会构建页面，改了界面要重新运行。
-// 用法：npm run walkthrough（用 Ego 跑，深色、浅色各一遍，见 test/ui-walkthrough.mjs）。
+// 前提：pnpm dev:mock 已在运行（http://127.0.0.1:5179，接的是模拟接口）。它启动时会构建页面，改了界面要重新运行。
+// 用法：pnpm walkthrough（用 Ego 跑，深色、浅色各一遍，见 test/ui-walkthrough.mjs）。
 // 也能直接给 Aside：aside repl "$(sed 's/__THEME__/light/' test/ui-walkthrough.aside.js)"
 //
 // 每个状态都检查：

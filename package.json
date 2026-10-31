@@ -17,6 +17,7 @@
   "engines": {
     "node": ">=22.18"
   },
+  "packageManager": "pnpm@11.15.1",
   "type": "module",
   "dependencies": {
     "@xyflow/react": "^12.12.0",

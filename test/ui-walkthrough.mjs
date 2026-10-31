@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 用 Ego 浏览器跑整体走查（test/ui-walkthrough.aside.js）。走查脚本本身不改，这里补上它用到的几个浏览器函数，交给 ego-browser 执行。
 //
-// 前提：npm run dev:mock 已在运行（http://127.0.0.1:5179）。改了界面要重新运行它，它启动时才构建页面。
+// 前提：pnpm dev:mock 已在运行（http://127.0.0.1:5179）。改了界面要重新运行它，它启动时才构建页面。
 // 用法：node test/ui-walkthrough.mjs [dark|light] [--space 任务空间编号]，不写主题就是深色、浅色各一遍。
 // 新建的任务空间开在后台，要你在 Ego 里切过去才渲染；--space 用一个已经在前台的空间，跑完不关它。
 // 截图存在 test/.tmp/walkthrough/。Ego 要停在这个走查的任务空间上：标签页不在前台时不渲染，截图和点击都会超时。
