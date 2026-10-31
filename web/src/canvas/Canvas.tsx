@@ -115,6 +115,8 @@ function Board({ id, onExit }: { id: string; onExit: () => void }) {
   const wrap = useRef<HTMLDivElement>(null);
   const anchor = useRef<HTMLSpanElement>(null);
   const file = useRef<HTMLInputElement>(null);
+  // 打开搜索的那个按钮：点它算切换，不算「点了别处」。
+  const findBtn = useRef<HTMLButtonElement>(null);
   // 从右键菜单点的上传：文件选好之后节点落在点右键的位置。
   const dropAt = useRef<{ x: number; y: number } | undefined>(undefined);
   const past = useRef<Snap[]>([]);
@@ -440,6 +442,8 @@ function Board({ id, onExit }: { id: string; onExit: () => void }) {
   );
 
   // ---------- 搜索、生成历史 ----------
+
+  const closeFind = useCallback(() => setFinding(false), []);
 
   // 跳到一个节点：只选中它，把它挪到视野中间，闪一下。缩得太小看不清就放大到 60%。
   const jumpTo = useCallback(
@@ -1536,7 +1540,7 @@ function Board({ id, onExit }: { id: string; onExit: () => void }) {
           {showMap && <MiniMap pannable zoomable position="bottom-right" style={{ width: 168, height: 112 }} />}
           {finding && (
             <Panel position="top-center" className="canvas-find">
-              <Finder nodes={nodes.filter((node) => !isGroup(node) && !isStack(node) && !node.hidden)} onJump={jumpTo} onClose={() => setFinding(false)} />
+              <Finder nodes={nodes.filter((node) => !isGroup(node) && !isStack(node) && !node.hidden)} onJump={jumpTo} onClose={closeFind} ignore={findBtn} />
             </Panel>
           )}
           <Panel position="top-left" className="canvas-title">
@@ -1605,7 +1609,7 @@ function Board({ id, onExit }: { id: string; onExit: () => void }) {
               <Icon name="workflow" size={18} />
               <span className="canvas-tool-name">工作流</span>
             </button>
-            <button className={`icon-btn ${finding ? 'active' : ''}`} type="button" aria-label="搜索节点" aria-pressed={finding} onClick={() => setFinding((on) => !on)}>
+            <button ref={findBtn} className={`icon-btn ${finding ? 'active' : ''}`} type="button" aria-label="搜索节点" aria-pressed={finding} onClick={() => setFinding((on) => !on)}>
               <Icon name="search" size={18} />
               <span className="canvas-tool-name">搜索节点</span>
             </button>

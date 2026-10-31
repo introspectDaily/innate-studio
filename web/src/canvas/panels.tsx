@@ -1,6 +1,6 @@
 // 浮在画布上的两块：节点搜索，和从生成历史里把结果放回画布。
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import type { Node } from '@xyflow/react';
 import { api, state, useStore } from '../store.ts';
 import { fmtTime } from '../format.ts';
@@ -26,9 +26,11 @@ function excerpt(node: Node, query: string) {
 }
 
 // 输入关键词，上下键选、回车跳过去。Esc 先清空关键词，再按一次关掉。
-export function Finder({ nodes, onJump, onClose }: { nodes: Node[]; onJump: (id: string) => void; onClose: () => void }) {
+// ignore 是打开它的那个按钮：点它不算「点了别处」，收起交给按钮自己切换，否则会先关又被点开。
+export function Finder({ nodes, onJump, onClose, ignore }: { nodes: Node[]; onJump: (id: string) => void; onClose: () => void; ignore?: RefObject<HTMLElement | null> }) {
   const [query, setQuery] = useState('');
   const [at, setAt] = useState(0);
+  const box = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLDivElement>(null);
   const word = query.trim().toLowerCase();
@@ -38,13 +40,24 @@ export function Finder({ nodes, onJump, onClose }: { nodes: Node[]; onJump: (id:
   useEffect(() => {
     input.current?.focus();
   }, []);
+  // 点在浮层以外的地方就收起：空白、别的节点、别的工具按钮都算。捕获阶段先收，后面的拖动、选中照常进行。
+  useEffect(() => {
+    const onDown = (e: PointerEvent) => {
+      // 这个文件里的 Node 是画布节点，DOM 的那个用 Element 表示（pointerdown 的 target 一定是元素）。
+      const target = e.target as Element | null;
+      if (box.current?.contains(target) || (target && ignore?.current?.contains(target))) return;
+      onClose();
+    };
+    document.addEventListener('pointerdown', onDown, true);
+    return () => document.removeEventListener('pointerdown', onDown, true);
+  }, [ignore, onClose]);
   // 新的浏览器里 scrollIntoView 会返回一个 Promise，不能直接当 effect 的返回值（React 会把它当成清理函数去调）。
   useEffect(() => {
     list.current?.querySelector('.active')?.scrollIntoView({ block: 'nearest' });
   }, [current]);
 
   return (
-    <div className="cfind nowheel" role="dialog" aria-label="搜索节点">
+    <div ref={box} className="cfind nowheel" role="dialog" aria-label="搜索节点">
       <div className="pop-search">
         <Icon name="search" />
         <input
