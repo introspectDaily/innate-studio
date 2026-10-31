@@ -872,6 +872,61 @@ test('画布：新建、保存、读回、改名、删除', async () => {
   assert.equal((await call('GET', `/api/canvases/${id}`)).status, 404);
 });
 
+test('画布：单个节点按字段合并，改提示词不动历史版本', async () => {
+  const created = await call('POST', '/api/canvases', { name: '节点补丁' });
+  const { id } = created.data;
+  const nodes = [
+    { id: 'n1', type: 'image', position: { x: 0, y: 0 }, data: { no: 1, prompt: '一只猫', model: IMAGE, aspect: 1, kept: [{ recordId: 'img_old', at: 1 }] } },
+    { id: 'n2', type: 'image', position: { x: 300, y: 0 }, data: { no: 2, prompt: '一只狗' } },
+  ];
+  await call('PUT', `/api/canvases/${id}`, { nodes, edges: [{ id: 'e1', source: 'n1', target: 'n2' }] });
+
+  const got = await call('GET', `/api/canvases/${id}/nodes/n1`);
+  assert.equal(got.status, 200);
+  assert.equal(got.data.data.prompt, '一只猫');
+
+  const patched = await call('PATCH', `/api/canvases/${id}/nodes/n1`, { data: { prompt: '雪夜的猫' } });
+  assert.equal(patched.status, 200);
+  assert.equal(patched.data.node.data.prompt, '雪夜的猫');
+  // 没传的字段原样留着：历史版本、模型、比例、编号。
+  assert.deepEqual(patched.data.node.data.kept, [{ recordId: 'img_old', at: 1 }]);
+  assert.equal(patched.data.node.data.model, IMAGE);
+  assert.equal(patched.data.node.data.aspect, 1);
+  assert.equal(patched.data.node.data.no, 1);
+  assert.deepEqual(patched.data.node.position, { x: 0, y: 0 });
+
+  // 同一张画布上的别的节点、连线都没动。
+  const read = await call('GET', `/api/canvases/${id}`);
+  assert.equal(read.data.nodes[1].data.prompt, '一只狗');
+  assert.equal(read.data.edges.length, 1);
+
+  // data 里写 null 是删掉这个键，不是写一个 null。
+  const cleared = await call('PATCH', `/api/canvases/${id}/nodes/n1`, { data: { aspect: null } });
+  assert.equal('aspect' in cleared.data.node.data, false);
+  assert.equal(cleared.data.node.data.prompt, '雪夜的猫');
+
+  // 位置、隐藏可以单独改；hidden: false 是真的把字段去掉。
+  const moved = await call('PATCH', `/api/canvases/${id}/nodes/n2`, { position: { x: 500, y: 120 }, hidden: true });
+  assert.deepEqual(moved.data.node.position, { x: 500, y: 120 });
+  assert.equal(moved.data.node.hidden, true);
+  assert.equal((await call('PATCH', `/api/canvases/${id}/nodes/n2`, { hidden: false })).data.node.hidden, undefined);
+
+  // 出错的情形：节点不存在、字段不认识、什么都没给、data 不是对象、位置不是数字。
+  assert.equal((await call('GET', `/api/canvases/${id}/nodes/n404`)).status, 404);
+  assert.equal((await call('PATCH', `/api/canvases/${id}/nodes/n404`, { data: { prompt: 'x' } })).status, 404);
+  const typo = await call('PATCH', `/api/canvases/${id}/nodes/n1`, { prompt: 'x' });
+  assert.equal(typo.status, 400, 'prompt 写在顶层是拼错，要报错而不是静默不生效');
+  assert.match(typo.data.error.message, /data/);
+  assert.equal((await call('PATCH', `/api/canvases/${id}/nodes/n1`, { data: {} })).status, 400);
+  assert.equal((await call('PATCH', `/api/canvases/${id}/nodes/n1`, { data: [] })).status, 400);
+  assert.equal((await call('PATCH', `/api/canvases/${id}/nodes/n1`, { position: { x: 'a', y: 1 } })).status, 400);
+
+  // 合并的结果落到磁盘上了。
+  const onDisk = JSON.parse(fs.readFileSync(path.join(dataDir, 'canvases.json'), 'utf8')).find((c) => c.id === id);
+  assert.equal(onDisk.nodes[0].data.prompt, '雪夜的猫');
+  await call('DELETE', `/api/canvases/${id}`);
+});
+
 test('角色：新建、从生成记录选的图会复制一份、改、删', async () => {
   const shot = await upload(PNG, 'image/png');
   // 生成一张图，拿它当角色的参考图。

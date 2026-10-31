@@ -14,6 +14,10 @@
 //   innate generate image --model doubao-seedream-5-0-pro-260628 --prompt "一只猫" --ratio 1:1 --wait --json
 //   innate upload ./ref.png
 //   innate canvas grid --name 分镜 --ids r1,r2,r3,r4,r5,r6,r7,r8,r9 --cols 3 --gap 360
+//   innate canvas node set <画布id> <节点id> --prompt "改成雪夜"   只改这一个节点的提示词
+//   innate canvas node set <画布id> <节点id> --prompt --edit '[{"ori_text":"雨夜","new_text":"雪夜"}]'
+//                                                          在现有提示词上按原文替换（可以一次改多处）
+//   innate canvas node list <画布id>                          先看画布上有哪些节点
 //   innate workflow save --canvas <画布id> --name 分镜模板    把整张画布存成可复用的工作流
 //   innate flow list                                          平台工作流（AutoDL.art）目录
 //   innate wait <记录id> --timeout 60
@@ -312,7 +316,14 @@ async function cmdCanvas(args) {
     case 'update': {
       const id = args.positionals[1];
       if (!id) throw new Error('用法: innate canvas update <画布id> [--nodes <文件.json>]');
-      const body = args.flags.nodes ? JSON.parse(fs.readFileSync(args.flags.nodes, 'utf8')) : {};
+      let body = {};
+      if (args.flags.nodes) {
+        const parsed = readJsonFile(args.flags.nodes, 'nodes');
+        // 文件可以是节点数组（文档里就是这么写的），也可以是 {nodes, edges} 整个请求体。
+        // 数组以前会被当成请求体原样发出去，服务端找不到 nodes 字段，于是什么也没改——静默失败，最坑。
+        body = Array.isArray(parsed) ? { nodes: parsed } : parsed;
+        if (!Array.isArray(body.nodes)) throw new Error(`--nodes 文件要是节点数组，或者带 nodes 字段的对象：${args.flags.nodes}`);
+      }
       const canvas = await api('PUT', `/api/canvases/${id}`, { body });
       // 服务端返回的 canvasMeta 不带节点数，用这次写进去的自己算。
       const count = Array.isArray(body.nodes) ? body.nodes.length : undefined;
@@ -324,10 +335,13 @@ async function cmdCanvas(args) {
       await api('DELETE', `/api/canvases/${id}`);
       return { _cmd: 'canvas', action: 'delete', id };
     }
+    case 'node':
+      // 和 main 一样，把「node」这一层去掉，子命令拿到的才是真正的参数。
+      return cmdCanvasNode({ positionals: args.positionals.slice(1), flags: args.flags });
     case 'grid':
       return cmdCanvasGrid(args);
     default:
-      throw new Error('用法: innate canvas <create|get|list|update|delete|grid> ...');
+      throw new Error('用法: innate canvas <create|get|list|update|delete|grid|node> ...');
   }
 }
 
@@ -357,6 +371,153 @@ async function cmdCanvasGrid(args) {
     : [];
   const updated = await api('PUT', `/api/canvases/${id}`, { body: { nodes, edges } });
   return { _cmd: 'canvas', action: 'grid', id, name: updated.name, nodes: nodes.length, edges: edges.length, cols, gap };
+}
+
+// ---------- 画布上的单个节点：只读一个、只改一个 ----------
+// `canvas update` 是整份替换，改一个提示词也得把整个节点数组搬一遍，中途页面上的改动会被一起盖掉。
+// 改字走这里：只把要改的字段发出去，服务端合到一个节点上，历史版本、分组关系都留着。
+const nodeBrief = (node) => ({
+  id: node.id,
+  type: node.type,
+  no: node.data?.no ?? null,
+  prompt: node.data?.prompt ?? null,
+  text: node.data?.text ?? null,
+  content: node.data?.recordId || node.data?.upload?.url || null,
+  hidden: Boolean(node.hidden),
+  ...(Array.isArray(node.data?.members) ? { members: node.data.members.length } : {}),
+});
+
+// --edit 的一项：{ori_text, new_text}，照原文定位再换掉，跟改文件时的 old/new 是一回事。
+// 一组改动不限于一对：重复给 --edit、一次给一个数组、或者给一个装着数组的 .json 文件都行，按顺序叠加。
+// 短的时候也可以写成 ["原文","新文"]。值以 { 或 [ 开头就当 JSON 解析；否则当文件路径读。
+function readEditSpec(value) {
+  const one = (item) => {
+    // ["原文", "新文"]：只改一两处时比写对象省事。
+    if (Array.isArray(item)) {
+      if (item.length !== 2 || typeof item[0] !== 'string' || typeof item[1] !== 'string') {
+        throw new Error('--edit 里的数组项要写成 ["原文","新文"]，两项都是字符串');
+      }
+      return { ori: item[0], next: item[1] };
+    }
+    if (!item || typeof item !== 'object') throw new Error('--edit 的每一项要长这样：{"ori_text":"…","new_text":"…"}');
+    if (item.ori_text != null && typeof item.ori_text !== 'string') throw new Error('--edit 的 ori_text 要写成字符串');
+    if (typeof item.new_text !== 'string') throw new Error('--edit 的 new_text 要写成字符串（要删掉一段就写 ""）');
+    return { ori: item.ori_text ?? '', next: item.new_text };
+  };
+  const ops = toArr(value).flatMap((raw) => {
+    if (raw === true) throw new Error(`--edit 要给一组改动：{"ori_text":"原文","new_text":"改成"}`);
+    const text = String(raw).trim();
+    let parsed;
+    if (text.startsWith('{') || text.startsWith('[')) {
+      try { parsed = JSON.parse(text); } catch { throw new Error(`--edit 不是合法 JSON：${text.slice(0, 40)}`); }
+    } else {
+      parsed = readJsonFile(text, 'edit');
+    }
+    // 一串字符串（["原文","新文"]）是一对，不是两个改动。
+    if (Array.isArray(parsed) && parsed.length && parsed.every((item) => typeof item === 'string')) return [one(parsed)];
+    return (Array.isArray(parsed) ? parsed : [parsed]).map(one);
+  });
+  if (!ops.length) throw new Error('--edit 里没有改动');
+  return ops;
+}
+
+// 一处一处往现有的内容上改。ori_text 必须原样找得到：找不到说明记错了原文，出现多次说明定位不够明确，
+// 两种都报错而不是猜——猜错就是悄悄改坏别人的提示词。--all 才允许一次改掉所有出现的地方。
+function applyEdits(before, ops, all) {
+  let text = before;
+  const applied = [];
+  for (const { ori, next } of ops) {
+    // ori_text 留空 = 追加到结尾（补一句风格要求这类）。
+    if (!ori) {
+      text = text ? `${text}${next}` : next;
+      applied.push({ ori_text: '', new_text: next, count: 1 });
+      continue;
+    }
+    const count = text.split(ori).length - 1;
+    if (!count) {
+      throw new Error(`没找到要改的原文：${JSON.stringify(ori.slice(0, 40))}\n   节点里现在是：${JSON.stringify(before.slice(0, 120))}\n   （用 innate canvas node get 看全文，ori_text 必须一字不差）`);
+    }
+    if (count > 1 && !all) {
+      throw new Error(`「${ori.slice(0, 40)}」出现了 ${count} 次，说不准改哪一处：把 ori_text 写长一点带上上下文，或者加 --all 全改`);
+    }
+    // 用 indexOf 拼接，不用 replace：new_text 里出现 $& 这类字符时 replace 会当成替换语法。
+    const at = text.indexOf(ori);
+    text = all ? text.split(ori).join(next) : `${text.slice(0, at)}${next}${text.slice(at + ori.length)}`;
+    applied.push({ ori_text: ori, new_text: next, count: all ? count : 1 });
+  }
+  return { text, applied };
+}
+
+async function cmdCanvasNode(args) {
+  const sub = args.positionals[0];
+  const canvasId = args.positionals[1];
+  const nodeId = args.positionals[2];
+  const flags = args.flags;
+  if (!canvasId) throw new Error('用法: innate canvas node <get|set|list> <画布id> [节点id] [--prompt …]');
+
+  // 只拿节点清单：画布可能很大，先看一眼有哪几个节点、各自写了什么。
+  if (sub === 'list') {
+    const canvas = await api('GET', `/api/canvases/${canvasId}`);
+    return { _cmd: 'canvas', action: 'node', nodeAction: 'list', canvas: canvas.id, name: canvas.name, items: (canvas.nodes || []).map(nodeBrief) };
+  }
+  if (sub !== 'get' && sub !== 'set') throw new Error('用法: innate canvas node <get|set|list> ...');
+  if (!nodeId) throw new Error(`用法: innate canvas node ${sub} <画布id> <节点id>${sub === 'set' ? ' [--prompt "…"]' : ''}`);
+
+  if (sub === 'get') {
+    const node = await api('GET', `/api/canvases/${canvasId}/nodes/${encodeURIComponent(nodeId)}`);
+    return { _cmd: 'canvas', action: 'node', nodeAction: 'get', canvas: canvasId, node };
+  }
+
+  // set：只把传进来的字段放进请求。文本节点 content 是 --text，写作要求是 --prompt，别搞混。
+  const editing = has(flags, 'edit');
+  // 跟 --edit 一起用时，--prompt / --text 只是「改哪个字段」的开关，不带值。
+  const editTarget = editing ? (has(flags, 'prompt') ? 'prompt' : has(flags, 'text') ? 'text' : null) : null;
+  const data = {};
+  if (!editing && has(flags, 'prompt')) data.prompt = String(flags.prompt);
+  if (!editing && has(flags, 'text')) data.text = String(flags.text);
+  let editResult = null;
+  if (editing) {
+    const ops = readEditSpec(flags.edit);
+    if (!editTarget) {
+      throw new Error(`--edit 要跟着 --prompt 或 --text 用：innate canvas node set <画布id> <节点id> --prompt --edit '{"ori_text":"原文","new_text":"改成"}'`);
+    }
+    if (typeof flags[editTarget] === 'string') {
+      throw new Error(`--edit 直接改节点里现有的 ${editTarget}，别同时给 --${editTarget} 的值；要整段换掉就去掉 --edit`);
+    }
+    // 先读这一个节点，拿到现有的内容再在本地改：不用把整段重发一遍，也看得见改了哪几处。
+    const node = await api('GET', `/api/canvases/${canvasId}/nodes/${encodeURIComponent(nodeId)}`);
+    const before = String(node.data?.[editTarget] ?? '');
+    editResult = applyEdits(before, ops, has(flags, 'all'));
+    data[editTarget] = editResult.text;
+  }
+  if (flags.data !== undefined) {
+    let extra;
+    try { extra = JSON.parse(flags.data); } catch { throw new Error('--data 不是合法 JSON'); }
+    if (!extra || typeof extra !== 'object' || Array.isArray(extra)) throw new Error(`--data 要是一个 JSON 对象，例如 '{"model":"…"}'`);
+    Object.assign(data, extra);
+  }
+  const body = {};
+  if (Object.keys(data).length) body.data = data;
+  if (has(flags, 'pos')) {
+    const [x, y] = String(flags.pos).split(',').map((v) => Number(v.trim()));
+    if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error('--pos 要写成 x,y，例如 --pos 0,420');
+    body.position = { x, y };
+  }
+  if (has(flags, 'hide')) body.hidden = true;
+  if (has(flags, 'show')) body.hidden = false;
+  if (!Object.keys(body).length) {
+    throw new Error(`要改点什么：--prompt "…" / --prompt --edit '{"ori_text":"…","new_text":"…"}' / --text "…" / --data '{"model":"…"}' / --pos x,y / --hide / --show`);
+  }
+  const result = await api('PATCH', `/api/canvases/${canvasId}/nodes/${encodeURIComponent(nodeId)}`, { body });
+  return {
+    _cmd: 'canvas',
+    action: 'node',
+    nodeAction: 'set',
+    canvas: result.canvas,
+    changed: Object.keys(body),
+    node: result.node,
+    ...(editResult ? { target: editTarget, edits: editResult.applied } : {}),
+  };
 }
 
 // ---------- 画布工作流：把画布上的一整套节点和连线存下来，之后原样放回任何一张画布 ----------
@@ -547,6 +708,29 @@ function printHuman(out) {
       console.log(`已上传: ${out.url}  (${out.size} 字节)`);
       break;
     case 'canvas':
+      if (out.action === 'node') {
+        if (out.nodeAction === 'list') {
+          console.log(`画布 ${out.canvas}（${out.name || '未命名'}）共 ${out.items.length} 个节点`);
+          for (const n of out.items) {
+            const head = String(n.prompt || n.text || n.content || '').replace(/\s+/g, ' ').slice(0, 40);
+            const bits = [n.hidden ? '隐藏' : '', n.members != null ? `${n.members} 个成员` : ''].filter(Boolean);
+            console.log(`  ${n.id}  ${n.type}${n.no ? ` ${n.no}` : ''}${bits.length ? `  [${bits.join('，')}]` : ''}  ${head}`);
+          }
+        } else if (out.nodeAction === 'set') {
+          const n = out.node;
+          console.log(`✓ 已改节点: ${n.id}（${n.type}${n.data?.no ? ` ${n.data.no}` : ''}）  字段: ${out.changed.join(', ')}`);
+          // 按原文替换的，一处一行写清换了什么；改的是哪一段，看这行比看全文快。
+          for (const e of out.edits || []) {
+            const from = e.ori_text ? JSON.stringify(e.ori_text) : '（末尾）';
+            console.log(`   替换 ${e.count} 处: ${from} → ${JSON.stringify(e.new_text)}`);
+          }
+          const shown = String(n.data?.prompt || n.data?.text || '').replace(/\s+/g, ' ');
+          if (shown) console.log(`   ${shown.length > 80 ? `${shown.slice(0, 80)}…` : shown}`);
+        } else {
+          console.log(JSON.stringify(out.node, null, 2));
+        }
+        break;
+      }
       if (out.action === 'grid') {
         console.log(`画布已创建: ${out.id}  (${out.name})`);
         console.log(`  节点: ${out.nodes}  连线: ${out.edges}  布局: ${out.cols}列 × 间距${out.gap}`);
@@ -733,6 +917,18 @@ const USAGE = `Innate Studio Agent CLI
   upload <本地文件>                      上传参考素材，返回 /media/uploads/... 地址
   canvas create --name <名> | get <id> | list | delete <id>
   canvas update <id> [--nodes <文件.json>]   整份替换节点（不是追加）
+  canvas node list <画布id>                  列出节点：id、类型、编号、提示词开头
+  canvas node get  <画布id> <节点id>         读一个节点的完整数据
+  canvas node set  <画布id> <节点id> [--prompt "…"] [--text "…"] [--data '{"model":"…"}']
+                   [--pos x,y] [--hide|--show]
+                                         只改传进来的字段（改提示词用它，别整份 update）；
+                                         --data 里写 null 是删掉这个键
+  canvas node set  <画布id> <节点id> --prompt --edit '[{"ori_text":"原文","new_text":"改成"}, …]'
+                   [--edit …] [--all]    在现有内容上按原文替换，不用重发整段；改动可以是一组
+                                         （重复给 --edit / 一个数组 / 一个 .json 文件），
+                                         每项也可以简写成 ["原文","新文"]；
+                                         ori_text 留空是追加到结尾；找不到或出现多处都报错
+                                         （--all 才全改）
   canvas grid --ids a,b,c [--cols 3] [--gap 360] [--type image] [--chain] [--start-x 0 --start-y 0]
                                          新建画布并按网格精确摆放
   workflow list | get <id> | delete <id>

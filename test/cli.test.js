@@ -145,6 +145,212 @@ test('只读令牌撞墙时给出换 write 令牌的出路', async () => {
   assert.ok(r.err.includes('pnpm user token add --scope write'), '要告诉 agent 怎么拿到能写令牌');
 });
 
+test('canvas update --nodes: 文件是节点数组（文档写法）也照原样写进 nodes', async () => {
+  const file = path.join(os.tmpdir(), `innate-nodes-${process.pid}.json`);
+  const nodes = [{ id: 'n1', type: 'image', position: { x: 0, y: 0 }, data: { prompt: '猫' } }];
+  fs.writeFileSync(file, JSON.stringify(nodes));
+  const calls = [];
+  try {
+    const r = await runMain(['canvas', 'update', 'cv1', '--nodes', file, '--json'], async (u, init) => {
+      calls.push({ u, init });
+      return makeRes(200, { id: 'cv1', name: '分镜' });
+    });
+    assert.equal(r.code, 0);
+    // 以前数组被当成整个请求体原样发出去，服务端找不到 nodes 字段，画布一点没变。
+    assert.deepEqual(JSON.parse(calls[0].init.body), { nodes });
+    assert.equal(JSON.parse(r.out).count, 1);
+  } finally {
+    fs.unlinkSync(file);
+  }
+});
+
+test('canvas node get: 只请求这一个节点', async () => {
+  const calls = [];
+  const r = await runMain(['canvas', 'node', 'get', 'cv1', 'n-3', '--json'], async (u, init) => {
+    calls.push({ u, init });
+    return makeRes(200, { id: 'n-3', type: 'image', data: { no: 3, prompt: '雨夜街道', kept: [{ recordId: 'r0', at: 1 }] } });
+  });
+  assert.equal(r.code, 0);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].u, /\/api\/canvases\/cv1\/nodes\/n-3$/);
+  assert.equal(calls[0].init.method, 'GET');
+  // 整份节点原样给出来：历史版本这些也得看到，改的时候才不会漏。
+  assert.ok(r.out.includes('kept'));
+});
+
+test('canvas node set --prompt: 只 PATCH data.prompt，不动别的字段', async () => {
+  const calls = [];
+  const r = await runMain(['canvas', 'node', 'set', 'cv1', 'n-3', '--prompt', '雪夜街道', '--json'], async (u, init) => {
+    calls.push({ u, init });
+    return makeRes(200, { canvas: 'cv1', updatedAt: 1, node: { id: 'n-3', type: 'image', position: { x: 0, y: 0 }, data: { no: 3, prompt: '雪夜街道', kept: [{ recordId: 'r0', at: 1 }] } } });
+  });
+  assert.equal(r.code, 0);
+  assert.equal(calls.length, 1, '一次请求搞定，不需要先 GET 再写回整份');
+  assert.match(calls[0].u, /\/api\/canvases\/cv1\/nodes\/n-3$/);
+  assert.equal(calls[0].init.method, 'PATCH');
+  assert.deepEqual(JSON.parse(calls[0].init.body), { data: { prompt: '雪夜街道' } });
+  assert.ok(r.out.includes('雪夜街道'));
+});
+
+test('canvas node set: --text / --data / --pos / --hide 合进一个请求', async () => {
+  const calls = [];
+  await runMain(['canvas', 'node', 'set', 'cv1', 'n-1', '--text', '第一镜：雨夜', '--data', '{"model":"doubao-seedance-2-5","flowValues":null}', '--pos', '0,420', '--hide', '--json'], async (u, init) => {
+    calls.push({ u, init });
+    return makeRes(200, { canvas: 'cv1', updatedAt: 1, node: { id: 'n-1', type: 'text', data: { text: '第一镜：雨夜' } } });
+  });
+  assert.equal(calls[0].init.method, 'PATCH');
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    data: { text: '第一镜：雨夜', model: 'doubao-seedance-2-5', flowValues: null },
+    position: { x: 0, y: 420 },
+    hidden: true,
+  });
+});
+
+test('canvas node set 什么都不给就报用法，不发请求', async () => {
+  let called = 0;
+  const r = await runMain(['canvas', 'node', 'set', 'cv1', 'n-3'], async () => { called += 1; return makeRes(200, {}); });
+  assert.equal(r.code, 1);
+  assert.equal(called, 0);
+  assert.ok(r.err.includes('--prompt'));
+});
+
+test('canvas node list: 一个请求列出整个画布的节点摘要', async () => {
+  const calls = [];
+  const r = await runMain(['canvas', 'node', 'list', 'cv1', '--json'], async (u, init) => {
+    calls.push({ u, init });
+    return makeRes(200, { id: 'cv1', name: '分镜', nodes: [
+      { id: 'n-1', type: 'image', position: { x: 0, y: 0 }, data: { no: 1, prompt: '雨夜街道', recordId: 'r1' } },
+      { id: 'n-2', type: 'group', position: { x: 0, y: 0 }, data: { members: ['n-1'] } },
+    ] });
+  });
+  assert.equal(r.code, 0);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].u, /\/api\/canvases\/cv1$/);
+  const out = JSON.parse(r.out);
+  assert.equal(out.items[0].prompt, '雨夜街道');
+  assert.equal(out.items[0].content, 'r1');
+  assert.equal(out.items[1].members, 1);
+});
+
+// --prompt --edit：先读这一个节点，在本地按原文替换，再把结果 PATCH 回去。
+function editRun(ops, { current = '', args = [] } = {}) {
+  const calls = [];
+  const run = runMain(['canvas', 'node', 'set', 'cv1', 'n-3', '--prompt', ...ops.flatMap((op) => ['--edit', op]), ...args, '--json'], async (u, init) => {
+    calls.push({ u, init });
+    if (init.method === 'GET') return makeRes(200, { id: 'n-3', type: 'image', data: { no: 3, prompt: current, kept: [{ recordId: 'r0', at: 1 }] } });
+    return makeRes(200, { canvas: 'cv1', updatedAt: 1, node: { id: 'n-3', type: 'image', data: { no: 3, prompt: JSON.parse(init.body).data.prompt } } });
+  });
+  return { calls, run };
+}
+const patchPrompt = (calls) => JSON.parse(calls[1].init.body).data.prompt;
+
+test('canvas node set --prompt --edit: 按 ori_text 替换，只 PATCH 改后的完整内容', async () => {
+  const { calls, run } = editRun(['{"ori_text":"雨夜","new_text":"雪夜"}'], { current: '雨夜的街道，一只猫' });
+  const r = await run;
+  assert.equal(r.code, 0);
+  assert.equal(calls.length, 2, '读一个节点 + 写一个字段');
+  assert.equal(calls[0].init.method, 'GET');
+  assert.equal(calls[1].init.method, 'PATCH');
+  assert.deepEqual(JSON.parse(calls[1].init.body), { data: { prompt: '雪夜的街道，一只猫' } });
+  assert.deepEqual(JSON.parse(r.out).edits, [{ ori_text: '雨夜', new_text: '雪夜', count: 1 }]);
+});
+
+test('canvas node set --prompt --edit: 一组改动按顺序叠加，重复 --edit 或给数组都行', async () => {
+  const ops = '{"ori_text":"雨夜","new_text":"雪夜"}';
+  const ops2 = '{"ori_text":"一只猫","new_text":"一个女孩"}';
+  const repeated = editRun([ops, ops2], { current: '雨夜的街道，一只猫' });
+  assert.equal((await repeated.run).code, 0);
+  assert.equal(patchPrompt(repeated.calls), '雪夜的街道，一个女孩');
+
+  const asArray = editRun([JSON.stringify([JSON.parse(ops), JSON.parse(ops2)])], { current: '雨夜的街道，一只猫' });
+  assert.equal((await asArray.run).code, 0);
+  assert.equal(patchPrompt(asArray.calls), '雪夜的街道，一个女孩');
+
+  // 一对的短写法：["原文","新文"]，单独给和一串给都认。
+  const pair = editRun(['["雨夜","雪夜"]'], { current: '雨夜的猫' });
+  assert.equal((await pair.run).code, 0);
+  assert.equal(patchPrompt(pair.calls), '雪夜的猫');
+
+  const pairs = editRun(['[["雨夜","雪夜"],["猫","女孩"]]'], { current: '雨夜的猫' });
+  assert.equal((await pairs.run).code, 0);
+  assert.equal(patchPrompt(pairs.calls), '雪夜的女孩');
+
+  const mixed = editRun(['[{"ori_text":"雨夜","new_text":"雪夜"},["猫","女孩"]]'], { current: '雨夜的猫' });
+  assert.equal((await mixed.run).code, 0);
+  assert.equal(patchPrompt(mixed.calls), '雪夜的女孩');
+
+  const empty = editRun(['[]'], { current: '雨夜的猫' });
+  assert.equal((await empty.run).code, 1);
+  assert.ok(empty.calls.length === 0, '空数组在本地就报错');
+});
+
+test('canvas node set --prompt --edit: ori_text 留空追加到结尾', async () => {
+  const { calls, run } = editRun(['{"new_text":"，电影感光影"}'], { current: '一只猫' });
+  const r = await run;
+  assert.equal(r.code, 0);
+  assert.equal(patchPrompt(calls), '一只猫，电影感光影');
+  assert.deepEqual(JSON.parse(r.out).edits[0], { ori_text: '', new_text: '，电影感光影', count: 1 });
+});
+
+test('canvas node set --prompt --edit: 原文找不到就报错，不写', async () => {
+  const { calls, run } = editRun(['{"ori_text":"雨夜","new_text":"雪夜"}'], { current: '一只猫' });
+  const r = await run;
+  assert.equal(r.code, 1);
+  assert.equal(calls.length, 1, '只有读，没有写');
+  assert.ok(r.err.includes('没找到要改的原文'));
+  assert.ok(r.err.includes('一只猫'), '要顺手把节点里现在的内容给出来，好改 ori_text');
+});
+
+test('canvas node set --prompt --edit: 出现多处要先加 --all', async () => {
+  const dup = '雨夜，雨夜的街道';
+  const ambiguous = await editRun(['{"ori_text":"雨夜","new_text":"雪夜"}'], { current: dup }).run;
+  assert.equal(ambiguous.code, 1);
+  assert.ok(ambiguous.err.includes('出现了 2 次'));
+  assert.ok(ambiguous.err.includes('--all'));
+
+  const { calls, run } = editRun(['{"ori_text":"雨夜","new_text":"雪夜"}'], { current: dup, args: ['--all'] });
+  const all = await run;
+  assert.equal(all.code, 0);
+  assert.equal(patchPrompt(calls), '雪夜，雪夜的街道');
+  assert.deepEqual(JSON.parse(all.out).edits[0], { ori_text: '雨夜', new_text: '雪夜', count: 2 });
+});
+
+test('canvas node set --prompt --edit: 改动清单可以放在 json 文件里', async () => {
+  const file = path.join(os.tmpdir(), `innate-edit-${process.pid}.json`);
+  fs.writeFileSync(file, JSON.stringify([{ ori_text: '雨夜', new_text: '雪夜' }, { ori_text: '猫', new_text: '女孩' }]));
+  try {
+    const { calls, run } = editRun([file], { current: '雨夜的猫' });
+    const r = await run;
+    assert.equal(r.code, 0);
+    assert.equal(patchPrompt(calls), '雪夜的女孩');
+  } finally {
+    fs.unlinkSync(file);
+  }
+});
+
+test('canvas node set --prompt --edit 的参数不对：缺目标字段、同时给值、JSON 不合法都报错且不发请求', async () => {
+  let called = 0;
+  const fetchOnce = async () => { called += 1; return makeRes(200, {}); };
+
+  const noTarget = await runMain(['canvas', 'node', 'set', 'cv1', 'n-3', '--edit', '{"ori_text":"a","new_text":"b"}'], fetchOnce);
+  assert.equal(noTarget.code, 1);
+  assert.ok(noTarget.err.includes('--prompt 或 --text'));
+
+  const withValue = await runMain(['canvas', 'node', 'set', 'cv1', 'n-3', '--prompt', '整段新提示词', '--edit', '{"ori_text":"a","new_text":"b"}'], fetchOnce);
+  assert.equal(withValue.code, 1);
+  assert.ok(withValue.err.includes('别同时给'));
+
+  const badJson = await runMain(['canvas', 'node', 'set', 'cv1', 'n-3', '--prompt', '--edit', '{ori_text:'], fetchOnce);
+  assert.equal(badJson.code, 1);
+  assert.ok(badJson.err.includes('不是合法 JSON'));
+
+  const noNew = await runMain(['canvas', 'node', 'set', 'cv1', 'n-3', '--prompt', '--edit', '{"ori_text":"a"}'], fetchOnce);
+  assert.equal(noNew.code, 1);
+  assert.ok(noNew.err.includes('new_text'));
+
+  assert.equal(called, 0, '参数不对就在本地报错，别去撞服务');
+});
+
 test('未知命令返回退出码 2', async () => {
   const r = await runMain(['frobnicate'], async () => makeRes(200, {}));
   assert.equal(r.code, 2);

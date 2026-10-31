@@ -56,6 +56,55 @@ route('PUT', /^\/api\/canvases\/([\w-]+)$/, async ({ req, params, space }) => {
   return canvasMeta(canvas);
 });
 
+// ---------- 画布上的单个节点 ----------
+// 整份 PUT 是「换成我这一份」，页面上同时在改的东西会被一起覆盖掉。agent 只想改一个节点的提示词时，
+// 走下面这两条：只动传进来的字段，节点的历史版本（kept）、分组里的成员（members）、比例这些都留着。
+
+function findNode(canvas, id) {
+  const node = (canvas.nodes || []).find((item) => item?.id === id);
+  if (!node) throw new HttpError(404, 'not_found', '节点不存在');
+  return node;
+}
+
+const NODE_FIELDS = ['data', 'position', 'hidden'];
+
+route('GET', /^\/api\/canvases\/([\w-]+)\/nodes\/([\w.-]+)$/, async ({ params, space }) => findNode(findCanvas(space, params[0]), params[1]));
+
+// data 是浅合并：给 null 是删掉这个键（例如清掉 flowValues），不是把值写成 null。
+// 不认识的字段直接 400：手写成 prompt 这种拼错，静默不生效比报错更难查。
+route('PATCH', /^\/api\/canvases\/([\w-]+)\/nodes\/([\w.-]+)$/, async ({ req, params, space }) => {
+  const canvas = findCanvas(space, params[0]);
+  const node = findNode(canvas, params[1]);
+  const body = await readJsonBody(req);
+  const unknown = Object.keys(body).filter((field) => !NODE_FIELDS.includes(field));
+  if (unknown.length) throw new HttpError(400, 'invalid_request', `不支持改 ${unknown.join('、')}；能改的是 ${NODE_FIELDS.join('、')}`);
+  if (body.data !== undefined) {
+    if (!body.data || typeof body.data !== 'object' || Array.isArray(body.data)) throw new HttpError(400, 'invalid_request', 'data 需要是一个对象');
+    const keys = Object.keys(body.data);
+    if (!keys.length) throw new HttpError(400, 'invalid_request', 'data 里没有要改的字段');
+    const data = { ...(node.data || {}) };
+    for (const key of keys) {
+      if (body.data[key] === null) delete data[key];
+      else data[key] = body.data[key];
+    }
+    node.data = data;
+  }
+  if (body.position !== undefined) {
+    const { x, y } = body.position || {};
+    if (!Number.isFinite(x) || !Number.isFinite(y)) throw new HttpError(400, 'invalid_request', 'position 要有数字的 x 和 y');
+    node.position = { x, y };
+  }
+  if (body.hidden !== undefined) {
+    if (typeof body.hidden !== 'boolean') throw new HttpError(400, 'invalid_request', 'hidden 需要是 true 或 false');
+    if (body.hidden) node.hidden = true;
+    else delete node.hidden;
+  }
+  if (!NODE_FIELDS.some((field) => body[field] !== undefined)) throw new HttpError(400, 'invalid_request', '要改点什么：data / position / hidden');
+  canvas.updatedAt = Date.now();
+  space.save('canvases');
+  return { canvas: canvas.id, node, updatedAt: canvas.updatedAt };
+});
+
 route('DELETE', /^\/api\/canvases\/([\w-]+)$/, async ({ params, space }) => {
   space.canvases.splice(space.canvases.indexOf(findCanvas(space, params[0])), 1);
   space.save('canvases');

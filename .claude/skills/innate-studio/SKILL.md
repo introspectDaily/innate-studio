@@ -91,6 +91,59 @@ innate canvas create --name 分镜          # 拿画布 id
 innate canvas update <画布id> --nodes nodes.json
 ```
 
+### 改画布上已有的节点：用 `canvas node`，别整份 update
+
+```bash
+innate canvas node list <画布id>                        # 先看有哪几个节点：id / 类型 / 编号 / 提示词开头
+innate canvas node get  <画布id> <节点id>                # 读一个节点的完整数据（含 kept 历史版本）
+innate canvas node set  <画布id> <节点id> --prompt "改成雪夜的街道，其余不变"
+innate canvas node set  <画布id> <节点id> --text "第一镜：雨夜，女孩跑进巷子"     # 文本节点的内容
+innate canvas node set  <画布id> <节点id> --data '{"model":"doubao-seedance-2-5-260628","duration":5}'
+innate canvas node set  <画布id> <节点id> --data '{"flowValues":null}'           # null = 删掉这个键
+innate canvas node set  <画布id> <节点id> --pos 0,420 --hide
+```
+
+### 只改提示词里的一段：`--prompt --edit`（别重发整段）
+
+整段重写容易把别的好句子弄丢。已知要改哪一段时，给一组 `ori_text` / `new_text`，跟改文件时一样先按原文定位：
+
+```bash
+# 一处替换
+innate canvas node set <画布id> <节点id> --prompt --edit '{"ori_text":"雨夜","new_text":"雪夜"}'
+
+# 多组改动一次给（一个数组，按顺序叠加）
+innate canvas node set <画布id> <节点id> --prompt \
+  --edit '[{"ori_text":"一只猫","new_text":"一个穿风衣的女孩"},
+           {"ori_text":"电影感光影","new_text":"冷蓝调，电影感光影"}]'
+
+# 同样的东西也可以拆成多个 --edit，或者每一项简写成 ["原文","新文"]
+innate canvas node set <画布id> <节点id> --prompt \
+  --edit '["一只猫","一个穿风衣的女孩"]' \
+  --edit '["电影感光影","冷蓝调，电影感光影"]'
+
+# 追加到结尾：ori_text 留空
+innate canvas node set <画布id> <节点id> --prompt --edit '{"new_text":"，35mm 胶片质感"}'
+
+# 改文本节点的内容同理
+innate canvas node set <画布id> <节点id> --text --edit '{"ori_text":"雨夜","new_text":"暴雪的深夜"}'
+
+# 改动多的时候写成文件（数组，元素同上）
+innate canvas node set <画布id> <节点id> --prompt --edit edits.json
+```
+
+- `--edit` 是**跟着 `--prompt` 或 `--text` 用的开关**，这两个 flag 这时不带值；同一句里既给 `--prompt "整段"` 又给 `--edit` 会直接报错。
+- 改动是**一组**，不限于一对：可以是一个数组（`[{…},{…}]` 或 `[["原文","新文"], …]`，两种可以混着写）、重复的 `--edit`、或者一个装着数组的 `.json` 文件。空数组直接报错。
+- 定位规则：`ori_text` 必须**一字不差**地出现。找不到 → 报错并把节点现在的内容贴出来（照着它改 `ori_text`）；出现多次 → 报错，让你把 `ori_text` 写长一点带上上下文，或加 `--all` 全改。
+- 顺序执行：后一条改动的 `ori_text` 是在前一条改完的结果里找的。
+- 实现上先 `GET` 这一个节点、在本地替换、再 `PATCH` 结果，所以**不需要**先读整张画布。
+- 输出会逐条列出改了什么（`替换 1 处: "雨夜" → "雪夜"`），`--json` 里是 `edits: [{ori_text, new_text, count}]`。
+
+- 服务端是**按字段浅合并**（`PATCH /api/canvases/<id>/nodes/<nodeId>`）：只改 `data` 里给出的键，`kept`（历史版本）、`aspect`、模型、`members` 这些没提的都留着；`position`、`hidden` 可单独改。
+- `data` 里的字段：图片/视频/音频节点的提示词是 `data.prompt`；文本节点的内容是 `data.text`，给文本模型的写作要求也是 `data.prompt`，别搞混。
+- 字段名写错（例如把 `prompt` 放在顶层）服务端直接 400，不会静默不生效。
+- **只有你自己在动这张画布时**才用 `canvas update`。用户在页面上开着同一张画布时，页面会把整份节点 PUT 回来，你在它读和写之间塞进去的修改会被覆盖——改字一律走 `canvas node set`。
+- 改完 `prompt` 不会自动重新生成：CLI 没有「执行节点」的命令，需要用户在页面上点生成。
+
 节点长这样（`canvas update` 的 `--nodes` 文件是**节点数组**）：
 
 ```json
