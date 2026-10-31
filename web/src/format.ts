@@ -14,6 +14,13 @@ export function fmtDuration(ms: number) {
   return s < 60 ? `${s} 秒` : `${Math.floor(s / 60)} 分 ${s % 60} 秒`;
 }
 
+// 时长（秒）写成 0:02 / 1:30，给播放器、剪辑器这类按秒工作的场景用。区别于上面的 fmtTime（按毫秒格式化日期）。
+export function fmtClock(seconds?: number) {
+  if (!Number.isFinite(seconds as number) || (seconds as number) < 0) return '0:00';
+  const s = Math.floor(seconds as number);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
 export function fmtBytes(n?: number) {
   if (!n) return '';
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;

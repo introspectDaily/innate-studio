@@ -12,14 +12,17 @@ import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
 
 // 自托管的 core 放在 web/public/ffmpeg/，由 Vite 在 /ffmpeg/ 下提供，可离线使用。
+// 用 ESM 构建：ffmpeg.wasm 的 worker 是 module worker，importScripts 不可用，
+// UMD 构建没有 default 导出，加载会报「failed to import ffmpeg-core.js」。
 const LOCAL_CORE = '/ffmpeg/ffmpeg-core.js';
 const LOCAL_WASM = '/ffmpeg/ffmpeg-core.wasm';
 // 兜底 CDN（本地文件缺失或加载失败时再用，需要联网）。
-const CDN_BASE = 'https://unpkg.com/@ffmpeg/core@0.12.10/dist/umd';
+const CDN_BASE = 'https://unpkg.com/@ffmpeg/core@0.12.10/dist/esm';
 
 // 核心文件的版本号，构建时由 vite 从 @ffmpeg/core/package.json 注入。
 declare const __FFMPEG_CORE_VERSION__: string;
-const CACHE_NAME = `ffmpeg-core-${__FFMPEG_CORE_VERSION__}`;
+// 缓存名带 -esm 后缀：早期存过一份对不上的 UMD core，换名字让它整体作废。
+const CACHE_NAME = `ffmpeg-core-${__FFMPEG_CORE_VERSION__}-esm`;
 
 // 32MB 的核心文件每次都从服务端取太浪费，第一次拿到之后就存在浏览器自己的缓存里（Cache Storage），
 // 之后直接从本地读。缓存名带着 core 的版本号，升级版本就自动换一套，不会接着用对不上的旧核心。
@@ -99,34 +102,60 @@ async function fetchSource(source: File | Blob | string): Promise<Uint8Array> {
   return (await fetchFile(source)) as Uint8Array;
 }
 
+// 把 worker 抛出来的错误规整成可读文本。
+// 0.12 版的 worker 失败时 reject 的是字符串（e.toString()），不是 Error 对象，
+// 直接取 .message 会得到 undefined，界面上就成了「剪辑失败：undefined」。
+export function errText(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'string') return err;
+  const msg = (err as { message?: unknown } | null)?.message;
+  if (typeof msg === 'string') return msg;
+  return String(err);
+}
+
 // 把一个视频按多段入/出点切出多个独立视频。
-// 返回每段对应的 Blob，方便直接上传落盘。
+// 返回每段对应的 Blob，方便直接上传落盘。时长过短（<0.05s）的分段会被剔除，不会产出空文件。
 export async function trimSegments(
   source: File | Blob | string,
   segments: Segment[],
   opts: TrimOptions = {},
 ): Promise<{ segment: Segment; blob: Blob }[]> {
   const ff = await getFFmpeg();
+  const valid = segments.filter((s) => Number.isFinite(s.start) && Number.isFinite(s.end) && s.end - s.start >= 0.05);
+  if (!valid.length) throw new Error('没有有效分段：每段的时长至少要 0.1 秒');
+
   const inputName = 'input.mp4';
   const bytes = await fetchSource(source);
   await ff.writeFile(inputName, bytes);
 
   const results: { segment: Segment; blob: Blob }[] = [];
   try {
-    for (let i = 0; i < segments.length; i++) {
-      const seg = segments[i];
+    for (let i = 0; i < valid.length; i++) {
+      const seg = valid[i];
       const out = `seg_${i}.mp4`;
+      // ffmpeg 命令失败时 exec 不抛错，原因只出现在 stderr 日志里；截最后几条，失败时随错误一起带出去。
+      const logs: string[] = [];
+      const logHandler = ({ type, message }: { type: string; message: string }) => {
+        if (type === 'stderr' && message) {
+          logs.push(message);
+          if (logs.length > 30) logs.shift();
+        }
+      };
       const handler = ({ progress }: { progress: number }) => opts.onProgress?.(i, progress);
       ff.on('progress', handler);
+      ff.on('log', logHandler);
       const args = opts.reencode
         ? ['-i', inputName, '-ss', String(seg.start), '-to', String(seg.end), '-c:v', 'libx264', '-preset', 'veryfast', '-c:a', 'aac', out]
         : ['-ss', String(seg.start), '-to', String(seg.end), '-i', inputName, '-c', 'copy', out];
       try {
-        await ff.exec(args);
+        const rc = await ff.exec(args);
+        if (rc !== 0) throw new Error(`ffmpeg 切片失败（退出码 ${rc}）：${logs.slice(-4).join(' | ') || '无输出信息'}`);
         const data = (await ff.readFile(out)) as Uint8Array;
+        if (!data || data.length === 0) throw new Error(`片段「${seg.name}」没有产出内容：${logs.slice(-4).join(' | ') || '无输出信息'}`);
         results.push({ segment: seg, blob: new Blob([data as BlobPart], { type: 'video/mp4' }) });
       } finally {
         ff.off('progress', handler);
+        ff.off('log', logHandler);
         try {
           await ff.deleteFile(out);
         } catch {

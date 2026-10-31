@@ -4,9 +4,9 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { openModal, toast } from '../ui/layers.tsx';
-import { fmtTime } from '../format.ts';
+import { fmtClock } from '../format.ts';
 import { uploadLocalFile } from '../media.ts';
-import { trimSegments, type Segment } from './ffmpeg.ts';
+import { trimSegments, errText, type Segment } from './ffmpeg.ts';
 import type { Made } from '../canvas/edit.tsx';
 
 // 剪出来的片段交给谁：
@@ -76,22 +76,70 @@ function VideoEditor({ url, name, onMade, reload, onClose }: EditorProps) {
   };
   const secFromEvent = (clientX: number) => ratioFromEvent(clientX) * duration;
 
+  // 让预览画面跳到某个时间点，选边界时画面跟手，看得到每一刀落在哪。
+  const seekTo = (sec: number) => {
+    const v = videoRef.current;
+    if (!v) return;
+    v.currentTime = sec;
+    setPlayhead(sec);
+  };
+
+  // 现有分段之外还空着的时间段。分段不允许互相覆盖，选区只能落在这些空位里。
+  const freeGaps = (list: Segment[]): [number, number][] => {
+    const out: [number, number][] = [];
+    let cur = 0;
+    for (const s of [...list].sort((a, b) => a.start - b.start)) {
+      if (s.start > cur) out.push([cur, s.start]);
+      cur = Math.max(cur, s.end);
+    }
+    if (duration > cur) out.push([cur, duration]);
+    return out;
+  };
+
+  // 把目标时间点收进离它最近的空位，并夹在 [lo, hi]（另一端不能被越过）。
+  const clampToFree = (t: number, lo: number, hi: number, list: Segment[]) => {
+    const range = freeGaps(list)
+      .map(([a, b]) => [Math.max(a, lo), Math.min(b, hi)] as [number, number])
+      .filter(([a, b]) => b - a > 0.05);
+    if (!range.length) return Math.min(Math.max(t, lo), hi);
+    const hit = range.find(([a, b]) => t >= a && t <= b);
+    if (hit) return t;
+    let best = range[0];
+    let bestD = Infinity;
+    for (const [a, b] of range) {
+      const d = t < a ? a - t : t > b ? t - b : 0;
+      if (d < bestD) {
+        bestD = d;
+        best = [a, b];
+      }
+    }
+    return t < best[0] ? best[0] : Math.min(t, best[1]);
+  };
+
+  // 和已有分段重叠 = 覆盖了别人，不允许。
+  const overlapsExisting = (a: number, b: number) => segments.some((s) => a < s.end - 1e-6 && b > s.start + 1e-6);
+
   const onPointerDown = (target: DragTarget) => (e: React.PointerEvent) => {
     e.preventDefault();
     drag.current = target;
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    // 拖动手柄/播放头时停住播放，边界画面跟手。
+    videoRef.current?.pause();
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
     if (!drag.current || !duration) return;
-    const sec = secFromEvent(e.clientX);
+    const raw = secFromEvent(e.clientX);
     if (drag.current === 'play') {
-      setPlayhead(sec);
-      if (videoRef.current) videoRef.current.currentTime = sec;
+      seekTo(raw);
     } else if (drag.current === 'start') {
-      setStart(Math.min(sec, end - 0.1));
+      const sec = clampToFree(raw, 0, end - 0.1, segments);
+      setStart(sec);
+      seekTo(sec);
     } else if (drag.current === 'end') {
-      setEnd(Math.max(sec, start + 0.1));
+      const sec = clampToFree(raw, start + 0.1, duration, segments);
+      setEnd(sec);
+      seekTo(sec);
     }
   };
 
@@ -107,9 +155,7 @@ function VideoEditor({ url, name, onMade, reload, onClose }: EditorProps) {
   // 点轨道空白处 = 移动播放头。
   const onTrackClick = (e: React.PointerEvent) => {
     if (drag.current) return;
-    const sec = secFromEvent(e.clientX);
-    setPlayhead(sec);
-    if (videoRef.current) videoRef.current.currentTime = sec;
+    seekTo(secFromEvent(e.clientX));
   };
 
   const addSegment = () => {
@@ -117,10 +163,21 @@ function VideoEditor({ url, name, onMade, reload, onClose }: EditorProps) {
       toast('选区太短，无法添加分段', 'error');
       return;
     }
-    const index = segments.length + 1;
-    setSegments((list) => [...list, { id: `s${Date.now()}`, start, end, name: `${baseName}_${index}.mp4` }]);
-    setStart(end);
-    setEnd(duration);
+    if (overlapsExisting(start, end)) {
+      toast('分段不能互相覆盖：请选一段没被占用的范围', 'error');
+      return;
+    }
+    const newSeg: Segment = { id: `s${Date.now()}`, start, end, name: `${baseName}_${segments.length + 1}.mp4` };
+    const nextList = [...segments, newSeg];
+    setSegments(nextList);
+    // 选区挪到下一段空位：优先贴着刚加的分段往后排，不行就找任意一个够长的空位。
+    const gaps = freeGaps(nextList);
+    const gap = gaps.find(([a, b]) => Math.abs(a - end) < 1e-6 && b - a >= 0.1) || gaps.find((g) => g[1] - g[0] >= 0.1);
+    if (gap) {
+      setStart(gap[0]);
+      setEnd(gap[1]);
+      seekTo(gap[0]);
+    }
   };
 
   const removeSegment = (id: string) => setSegments((list) => list.filter((s) => s.id !== id));
@@ -163,7 +220,7 @@ function VideoEditor({ url, name, onMade, reload, onClose }: EditorProps) {
         reload?.();
       }
     } catch (err) {
-      toast(`剪辑失败：${(err as Error).message}`, 'error', 7000);
+      toast(`剪辑失败：${errText(err)}`, 'error', 7000);
     } finally {
       setBusy(false);
       setEngineLoading(false);
@@ -178,7 +235,7 @@ function VideoEditor({ url, name, onMade, reload, onClose }: EditorProps) {
   return (
     <div className="ve">
       <video ref={videoRef} src={url} className="ve-preview" controls playsInline preload="metadata" />
-      <p className="muted small">拖动两端手柄选段，点轨道移动播放头；「添加分段」把当前选区加入列表，可切成多段。</p>
+      <p className="muted small">拖动两端手柄选段（预览画面会跟着跳到边界帧）；分段之间不允许重叠，选区会自动避开已有分段。点分段行可预览该段开头。</p>
 
       <div
         ref={trackRef}
@@ -202,15 +259,37 @@ function VideoEditor({ url, name, onMade, reload, onClose }: EditorProps) {
       </div>
 
       <div className="ve-readout">
-        <span>播放头 {fmtTime(playhead)}</span>
-        <span>入点 {fmtTime(start)}</span>
-        <span>出点 {fmtTime(end)}</span>
-        <span>当前选区 {fmtTime(Math.max(0, end - start))}</span>
+        <span>播放头 {fmtClock(playhead)}</span>
+        <span>入点 {fmtClock(start)}</span>
+        <span>出点 {fmtClock(end)}</span>
+        <span>当前选区 {fmtClock(Math.max(0, end - start))}</span>
       </div>
 
       <div className="ve-actions">
-        <button className="btn btn-sm" type="button" disabled={busy} onClick={() => setStart(playhead)}>设为入点</button>
-        <button className="btn btn-sm" type="button" disabled={busy} onClick={() => setEnd(playhead)}>设为出点</button>
+        <button
+          className="btn btn-sm"
+          type="button"
+          disabled={busy}
+          onClick={() => {
+            const sec = clampToFree(playhead, 0, end - 0.1, segments);
+            setStart(sec);
+            seekTo(sec);
+          }}
+        >
+          设为入点
+        </button>
+        <button
+          className="btn btn-sm"
+          type="button"
+          disabled={busy}
+          onClick={() => {
+            const sec = clampToFree(playhead, start + 0.1, duration, segments);
+            setEnd(sec);
+            seekTo(sec);
+          }}
+        >
+          设为出点
+        </button>
         <button className="btn btn-sm btn-primary" type="button" disabled={busy} onClick={addSegment}>添加分段</button>
         <label className="ve-check">
           <input type="checkbox" checked={reencode} disabled={busy} onChange={(e) => setReencode(e.target.checked)} />
@@ -223,7 +302,7 @@ function VideoEditor({ url, name, onMade, reload, onClose }: EditorProps) {
           <p className="muted small">还没有分段。选好一段后点「添加分段」。</p>
         ) : (
           segments.map((s, i) => (
-            <div className="ve-seg-row" key={s.id}>
+            <div className="ve-seg-row" key={s.id} title="点击预览该段开头" style={{ cursor: 'pointer' }} onClick={() => seekTo(s.start)}>
               <span className="ve-seg-idx">{i + 1}</span>
               <input
                 className="input input-sm ve-seg-name"
@@ -231,7 +310,7 @@ function VideoEditor({ url, name, onMade, reload, onClose }: EditorProps) {
                 disabled={busy}
                 onChange={(e) => setSegments((list) => list.map((x) => (x.id === s.id ? { ...x, name: e.target.value } : x)))}
               />
-              <span className="muted small">{fmtTime(s.start)} → {fmtTime(s.end)}（{fmtTime(s.end - s.start)}）</span>
+              <span className="muted small">{fmtClock(s.start)} → {fmtClock(s.end)}（{fmtClock(s.end - s.start)}）</span>
               <button className="btn btn-sm btn-danger" type="button" disabled={busy} onClick={() => removeSegment(s.id)}>删除</button>
             </div>
           ))

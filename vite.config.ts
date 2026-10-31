@@ -26,7 +26,10 @@ function syncFfmpegCore(): Plugin {
   return {
     name: 'sync-ffmpeg-core',
     buildStart() {
-      const fromDir = join(root, 'node_modules/@ffmpeg/core/dist/umd');
+      // 必须用 ESM 构建：@ffmpeg/ffmpeg 0.12 的 ESM 入口创建的是 module worker，
+      // 里面 importScripts 不可用，走 import(coreURL).default，UMD 构建没有 default 导出会直接报
+      // 「failed to import ffmpeg-core.js」。
+      const fromDir = join(root, 'node_modules/@ffmpeg/core/dist/esm');
       const toDir = join(root, 'web/public/ffmpeg');
       if (!existsSync(fromDir)) {
         this.warn('没找到 @ffmpeg/core，跳过核心文件同步；剪辑会回退到 CDN。请先安装依赖。');
