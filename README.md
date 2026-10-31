@@ -142,6 +142,13 @@ Once started, open **`http://127.0.0.1:5178`** in your browser. Click **Admin** 
 > PORT=5180 INNATE_DATA_DIR=/path/to/data pnpm start
 > ```
 
+#### Local-first media and public storage
+
+Media stays in local `data/uploads/` by default. It is uploaded to public storage only when a generation API requires a public URL or when you explicitly publish it from the media library. Valid public links are cached in `data/publications.json` and reused instead of uploading again.
+
+- **Volcengine TOS**: set `INNATE_STUDIO_VOLC_TOS_ACCESS_KEY_ID`, `INNATE_STUDIO_VOLC_TOS_ACCESS_KEY`, `INNATE_STUDIO_VOLC_TOS_BUCKET`, and `INNATE_STUDIO_VOLC_TOS_PATH`. The bucket must already exist; the app validates it and never creates it. The prefix is marked with `.keep`. TOS can also be configured under **Admin → Volcengine TOS**.
+- Ark reference videos require a directly readable media URL, and sharing local media needs a public link; both use TOS object URLs. Objects are uploaded with the `public-read` ACL, so the bucket must allow public reads or be bound to a publicly accessible custom domain.
+
 ---
 
 ## 👥 Team Mode & Deployment

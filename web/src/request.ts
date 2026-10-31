@@ -38,7 +38,7 @@ export function carryRefs(form: VideoForm, mode: VideoForm['mode'], maxImages: n
 }
 
 // 返回 { payload, problems }。problems 非空时不能提交。spec 是这个模型支持什么。
-// 图片和音频可以用本机的文件（本地服务会把它内嵌进请求）；参考视频只能用公网链接。
+// 图片和音频可以用本机的文件（本地服务会把它内嵌进请求）；参考视频也会由本地服务按需发布成公网直链。
 // 2026-10-09 用真实接口跑过：文生视频、首帧、首尾帧、参考图、图加视频加音频的参考生成都能用。
 export function buildVideoRequest(form: VideoForm, spec: VideoSpec): BuiltRequest {
   const problems: string[] = [];
@@ -66,8 +66,6 @@ export function buildVideoRequest(form: VideoForm, spec: VideoSpec): BuiltReques
   if (spec.promptRequired && !text && !problems.length) problems.push('请输入提示词');
   // 有首帧时画面比例跟着图片走，其余情况才需要指定。
   if (form.mode !== 'frames') payload.aspect_ratio = form.ratio;
-
-  if (refsInUse(form).some((r) => r.kind === 'video' && r.source === 'local')) problems.push('参考视频仅支持公网链接');
 
   if (spec.audio) payload.generate_audio = Boolean(form.generateAudio);
   const seed = String(form.seed).trim();

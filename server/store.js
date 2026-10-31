@@ -25,7 +25,7 @@ const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 export const config = readJson(CONFIG_FILE, {});
 export const saveConfig = () => writeJson(CONFIG_FILE, config, 0o600);
 
-const COLLECTIONS = ['history', 'canvases', 'characters', 'skills', 'workflows'];
+const COLLECTIONS = ['history', 'canvases', 'characters', 'skills', 'workflows', 'materials', 'publications'];
 const FILE_DIRS = [...Object.values(MEDIA_DIRS), 'uploads', 'thumbs'];
 
 class Space {

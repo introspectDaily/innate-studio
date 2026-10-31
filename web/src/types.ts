@@ -4,8 +4,40 @@ export type { Skill } from '../../shared/skills.ts';
 
 export type Kind = 'image' | 'video' | 'audio';
 export type CreateType = 'video' | 'image' | 'speech' | 'sfx' | 'music';
-export type ViewId = 'create' | 'canvas' | 'records' | 'characters' | 'skills';
+export type ViewId = 'create' | 'canvas' | 'materials' | 'records' | 'characters' | 'skills';
 export type Tone = 'ok' | 'pending' | 'error';
+
+
+// 火山引擎 TOS 素材库。配置里不会返回 Secret，只返回是否已配置和 Access Key 的头尾。
+export interface TosConfig {
+  configured: boolean;
+  bucket: string;
+  prefix: string;
+  region: string;
+  endpoint: string;
+  publicBaseUrl: string;
+  bucketUrl: string;
+  hasCredentials: boolean;
+  credentialHint: string;
+  credentialSource: 'env' | 'file' | 'tos-file' | '';
+}
+
+export interface TosObject {
+  key: string;
+  name: string;
+  url: string;
+  kind: Kind;
+  contentType: string;
+  size: number;
+  lastModified: string | null;
+}
+
+export interface TosObjectList {
+  items: TosObject[];
+  nextCursor: string;
+  truncated: boolean;
+  prefix: string;
+}
 
 // 一份参考素材：存在本机的文件，或者公网链接。
 export interface Ref {
@@ -119,6 +151,35 @@ export interface HistoryItem {
   usage?: { total_tokens?: number; completion_tokens?: number; cost_usd?: number; generated_images?: number; size?: string; text_words?: number; audio_seconds?: number };
   // 多人模式下这一条的积分：quote 是提交时预扣的，charged 是现在实际扣着的（完成后按用量结算，失败了是 0）。
   credits?: { quote: number; charged: number };
+}
+
+
+export interface Publication {
+  provider: 'tos';
+  url: string;
+  expiresAt: string | null;
+  direct: boolean;
+  valid: boolean;
+  checkedAt: number | null;
+  purpose: 'share' | 'reference';
+}
+
+// 本地素材：文件一直在 /media/uploads 下；publications 只是按需生成并缓存的公网地址。
+export interface LocalMaterial {
+  id: string;
+  url: string;
+  name: string;
+  kind: Kind;
+  size: number;
+  contentType: string;
+  createdAt: number;
+  publications: Publication[];
+}
+
+export interface StorageStatus {
+  preferred: 'tos' | '';
+  direct: 'tos' | '';
+  tos: TosConfig;
 }
 
 // 一个角色：名字、描述和几张参考图。images 是本机图片的地址。

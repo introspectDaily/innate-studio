@@ -10,6 +10,7 @@ import { Composer } from './composer/Composer.tsx';
 import { focusComposer } from './composer/state.ts';
 import { Recent, Records } from './history.tsx';
 import { Projects } from './canvas/Projects.tsx';
+import { Materials } from './tos.tsx';
 import { Characters } from './characters.tsx';
 import { Skills } from './skills.tsx';
 import { openSettings, openAdmin } from './settings.tsx';
@@ -23,6 +24,7 @@ import type { ViewId } from './types.ts';
 const VIEWS: { id: ViewId; label: string; icon: IconName; size?: number; stroke?: number }[] = [
   { id: 'create', label: '创作', icon: 'sparkle', size: 22, stroke: 1.45 },
   { id: 'canvas', label: '画布', icon: 'workflow' },
+  { id: 'materials', label: '素材库', icon: 'folder' },
   { id: 'records', label: '创作记录', icon: 'history' },
   { id: 'characters', label: '角色', icon: 'userStory' },
   { id: 'skills', label: '技能', icon: 'wandSparkles' },
@@ -99,6 +101,9 @@ function Workbench() {
         </div>
         <div className="view view-canvas" hidden={view !== 'canvas'}>
           {opened.has('canvas') && state.booted && <Projects />}
+        </div>
+        <div className="view" hidden={view !== 'materials'}>
+          {opened.has('materials') && <Materials />}
         </div>
         <div className="view" hidden={view !== 'records'}>
           {opened.has('records') && <Records />}

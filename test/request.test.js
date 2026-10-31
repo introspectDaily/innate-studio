@@ -52,7 +52,7 @@ test('首尾帧：放在 frame_images 里，比例跟着图片走；模型只收
   assert.deepEqual(buildVideoRequest(baseForm({ mode: 'frames' }), spec()).problems, ['请添加首帧图片']);
 });
 
-test('参考生成：素材放在 input_references 里；本机的视频用不了', () => {
+test('参考生成：素材放在 input_references 里；本机视频交给服务端按需发布', () => {
   const refs = { image: [local('/media/images/a.jpg')], video: [ref('video', 'https://example.com/a.mp4')], audio: [] };
   const { payload, problems } = buildVideoRequest(baseForm({ mode: 'reference', refs }), spec());
   assert.deepEqual(problems, []);
@@ -63,7 +63,10 @@ test('参考生成：素材放在 input_references 里；本机的视频用不�
   assert.equal(payload.aspect_ratio, '16:9');
 
   const localVideo = { image: [], video: [{ uid: 'v', kind: 'video', source: 'local', url: '/media/videos/a.mp4' }], audio: [] };
-  assert.match(buildVideoRequest(baseForm({ mode: 'reference', refs: localVideo }), spec()).problems[0], /公网链接/);
+  // 前端不再拦截本机视频：提交时由服务端按需发布并替换成公网直链。
+  const localVideoRequest = buildVideoRequest(baseForm({ mode: 'reference', refs: localVideo }), spec());
+  assert.deepEqual(localVideoRequest.problems, []);
+  assert.deepEqual(localVideoRequest.payload.input_references, [{ type: 'video_url', video_url: { url: '/media/videos/a.mp4' } }]);
   // 本机的参考音频可以用：由本地服务内嵌进请求
   const localAudio = { image: [], video: [], audio: [{ uid: 'a', kind: 'audio', source: 'local', url: '/media/uploads/a.mp3' }] };
   const withAudio = buildVideoRequest(baseForm({ mode: 'reference', refs: localAudio }), spec());

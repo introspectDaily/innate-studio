@@ -142,6 +142,13 @@ pnpm start
 > PORT=5180 INNATE_DATA_DIR=/path/to/data pnpm start
 > ```
 
+#### 本地优先与公网存储
+
+素材默认保存在本机 `data/uploads/`；只有生成接口必须使用公网 URL，或你在素材库主动发布时，才会上传公网副本。有效链接会缓存在 `data/publications.json` 并在后续生成中复用，不会重复上传。
+
+- **火山引擎 TOS**：配置 `INNATE_STUDIO_VOLC_TOS_ACCESS_KEY_ID`、`INNATE_STUDIO_VOLC_TOS_ACCESS_KEY`、`INNATE_STUDIO_VOLC_TOS_BUCKET`、`INNATE_STUDIO_VOLC_TOS_PATH`。Bucket 必须已存在，程序只校验、不会创建；路径通过 `.keep` 标记建立。也可在「管理 → 火山引擎 TOS」中填写。
+- Ark 参考视频需要模型可直接读取的媒体地址，素材分享也需要公网链接；两者都使用 TOS 对象地址。对象使用 `public-read` ACL，因此 Bucket 必须允许公开读，或绑定可公开访问的自定义域名。
+
 ---
 
 ## 👥 多人团队模式与部署
@@ -235,6 +242,7 @@ flowchart TD
 | `data/skills.json` | 用户自定义的提示词工程技能 |
 | `data/videos/` `images/` `audio/` | 生成完成自动落盘保存的视频、图像与音频文件 |
 | `data/uploads/` `thumbs/` | 用户上传的参考素材与自动生成的列表缩略图 |
+| `data/materials.json` / `publications.json` | 本地素材元数据与按需生成的公网链接缓存 |
 
 ---
 

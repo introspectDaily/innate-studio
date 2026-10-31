@@ -2,7 +2,7 @@
 
 import { ApiError, KINDS } from './store.ts';
 import { fmtBytes } from './format.ts';
-import type { HistoryItem, Kind, Ref } from './types.ts';
+import type { HistoryItem, Kind, Ref, TosObject } from './types.ts';
 
 // ---------- 缩略图 ----------
 
@@ -95,7 +95,7 @@ export async function uploadLocalFile(file: File, kind: Kind, onProgress?: Progr
   checkFileSize(file, kind);
   const video = kind === 'video' ? await readVideo(file).catch(() => null) : null;
   const thumb = video ? video.thumb : await makeThumb(file, kind);
-  const saved = await xhrUpload<{ url: string }>('/api/uploads', file, { 'Content-Type': file.type }, onProgress);
+  const saved = await xhrUpload<{ url: string }>(`/api/uploads?filename=${encodeURIComponent(file.name)}`, file, { 'Content-Type': file.type }, onProgress);
   return { uid: crypto.randomUUID(), kind, source: 'local', url: saved.url, name: file.name, thumb, duration: video?.duration };
 }
 
@@ -107,4 +107,15 @@ export async function refFromRecord(item: HistoryItem): Promise<Ref> {
   if (item.kind !== 'video') return ref;
   const video = await readVideo(item.mediaUrl!).catch(() => null);
   return { ...ref, thumb: video?.thumb || null, duration: video?.duration || 0 };
+}
+
+// 素材库上传：文件存到服务端配置的 TOS Bucket，返回的对象本身带公网 URL，可以直接作为参考视频。
+export async function uploadTosFile(file: File, onProgress?: Progress): Promise<Ref> {
+  const kind = kindOfFile(file);
+  if (!kind) throw new Error('只支持图片、视频或音频文件');
+  checkFileSize(file, kind);
+  const video = kind === 'video' ? await readVideo(file).catch(() => null) : null;
+  const thumb = video ? video.thumb : await makeThumb(file, kind);
+  const saved = await xhrUpload<TosObject>(`/api/tos/objects?filename=${encodeURIComponent(file.name)}`, file, { 'Content-Type': file.type }, onProgress);
+  return { uid: crypto.randomUUID(), kind: saved.kind || kind, source: 'url', url: saved.url, name: saved.name || file.name, thumb, duration: video?.duration };
 }

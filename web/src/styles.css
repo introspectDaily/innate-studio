@@ -1138,3 +1138,41 @@ input[type='search']::-webkit-search-cancel-button { -webkit-appearance: none; }
   .prompt, .skill-chip-row { grid-column: 1 / -1; grid-row: 2; }
   .composer-bar { grid-row: 3; }
 }
+
+/* ---------- TOS 素材库 ---------- */
+
+.tos-config .form-control .input { width: 270px; }
+.tos-config .settings-hint { margin: 0; }
+.materials-page .page-head h1 { font-size: var(--text-title); }
+.materials-empty { max-width: 560px; margin: var(--sp-32) auto; }
+.materials-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--sp-16); }
+.material-card { display: flex; flex-direction: column; min-width: 0; overflow: hidden; border-radius: var(--r-md); background: var(--surface-2); }
+.material-thumb { position: relative; display: grid; width: 100%; aspect-ratio: 16 / 10; overflow: hidden; padding: 0; border: 0; background: var(--surface-1); cursor: pointer; }
+.material-thumb img, .material-thumb video { width: 100%; height: 100%; object-fit: cover; }
+.material-audio-thumb { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--sp-8); width: 100%; height: 100%; padding: var(--sp-20); color: var(--text-2); font-size: var(--text-caption); text-align: center; }
+.material-audio-thumb > span:last-child { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.material-kind { position: absolute; left: var(--sp-8); bottom: var(--sp-8); display: inline-flex; align-items: center; gap: var(--sp-4); height: 22px; padding: 0 var(--sp-8); border-radius: 999px; background: var(--scrim); color: var(--on-scrim); font-size: var(--text-micro); backdrop-filter: blur(6px); }
+.material-info { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; padding: var(--sp-12) var(--sp-12) var(--sp-8); }
+.material-name { overflow: hidden; color: var(--text); font-size: var(--text-ui); text-overflow: ellipsis; white-space: nowrap; }
+.material-actions { display: flex; flex-wrap: wrap; gap: var(--sp-4); padding: 0 var(--sp-12) var(--sp-12); }
+.materials-more { display: flex; justify-content: center; padding: var(--sp-8) 0 var(--sp-24); }
+.material-preview { display: flex; flex-direction: column; gap: var(--sp-12); }
+.material-preview > img, .material-preview > video { width: 100%; max-height: min(62vh, 620px); object-fit: contain; border-radius: var(--r-sm); background: var(--surface-2); }
+.material-preview > audio { width: 100%; }
+.material-preview-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-12); }
+.picker-tos-toolbar { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-12); margin-bottom: var(--sp-8); }
+@media (max-width: 720px) {
+  .tos-config .form-control .input { width: min(100%, 220px); }
+  .materials-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+}
+
+.materials-strategy { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-16); flex-wrap: wrap; padding: var(--sp-12) var(--sp-16); border-radius: var(--r-md); background: var(--surface-2); }
+.materials-strategy > div:first-child { display: flex; flex-direction: column; gap: var(--sp-2); max-width: 680px; font-size: var(--text-ui); }
+.materials-strategy span { color: var(--text-3); font-size: var(--text-caption); }
+.materials-strategy-links { display: flex; align-items: center; gap: var(--sp-8); flex-wrap: wrap; }
+.materials-toolbar { margin-top: calc(var(--sp-4) * -1); }
+.materials-toolbar-actions { display: flex; align-items: center; gap: var(--sp-8); }
+.material-local-badge { position: absolute; right: var(--sp-8); top: var(--sp-8); display: inline-flex; align-items: center; height: 22px; padding: 0 var(--sp-8); border-radius: 999px; background: color-mix(in srgb, var(--ok) 80%, black); color: var(--bg); font-size: var(--text-micro); }
+.material-publication { display: flex; align-items: center; gap: var(--sp-4); min-width: 0; color: var(--text-2); font-size: var(--text-micro); }
+.material-publication span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.material-publication.is-stale { color: var(--text-3); }

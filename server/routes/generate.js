@@ -8,6 +8,7 @@ import { aihubmixKey, speechKey } from '../keys.js';
 import { callAihubmix, upstreamError, callArk, callMinimax, listOf, requireKey } from '../ark.js';
 import { doubaoSpeech, doubaoAudio } from '../speech.js';
 import { UPLOAD_TYPES, localMediaFile, withLocalFiles } from '../media.js';
+import { withPublicVideos } from '../publishing.js';
 import { MINIMAX_VIDEO_PATH, VIDEO_TASKS_PATH, applyTaskState, downloadResult, finishItem, historyView, isLegacy, isPending, isTimedOut, newId, newItem, pollTask, runDirect } from '../tasks.js';
 import { removeThumb } from '../thumbs.js';
 import { balanceOf, holdCredits, syncCredits } from '../credits.js';
@@ -33,9 +34,11 @@ route('POST', /^\/api\/videos$/, async ({ req, space, user }) => {
   holdCredits(user, [draft]);
   let data;
   try {
+    // 参考视频不能内嵌：先把 /media 开头的本机视频按需上传到 TOS，换成公网直链再提交。
+    const publicPayload = await withPublicVideos(space, payload);
     ({ data } = minimax
-      ? await callMinimax('POST', MINIMAX_VIDEO_PATH, { json: minimaxVideoRequest(withLocalFiles(space, payload)) })
-      : await callArk('POST', VIDEO_TASKS_PATH, { json: arkVideoRequest(withLocalFiles(space, payload)) }));
+      ? await callMinimax('POST', MINIMAX_VIDEO_PATH, { json: minimaxVideoRequest(withLocalFiles(space, publicPayload)) })
+      : await callArk('POST', VIDEO_TASKS_PATH, { json: arkVideoRequest(withLocalFiles(space, publicPayload)) }));
     if (!(data?.id || data?.task_id)) throw new HttpError(502, 'bad_upstream_response', `${(minimax ? MINIMAX : ARK).label} 未返回任务 ID`, data);
   } catch (err) {
     syncCredits(space, { ...draft, status: 'failed' });
@@ -334,12 +337,19 @@ route('POST', /^\/api\/audio\/music$/, async ({ req, space, user }) => {
 // ---------- 上传 ----------
 
 // 从本机选来当输入的文件先存到 uploads，之后用返回的地址引用它。
-route('POST', /^\/api\/uploads$/, async ({ req, space }) => {
+route('POST', /^\/api\/uploads$/, async ({ req, space, query }) => {
   const ext = UPLOAD_TYPES[String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase()];
   if (!ext) throw new HttpError(415, 'unsupported_media_type', '只支持 JPG、PNG、WebP 图片，MP4、MOV、WebM 视频，MP3、WAV 音频');
   const body = await readBody(req, MAX_UPLOAD_BYTES);
   if (!body.length) throw new HttpError(400, 'invalid_request', '文件为空');
   const file = `${newId('up')}.${ext}`;
   fs.writeFileSync(path.join(space.dir('uploads'), file), body);
-  return { url: `/media/uploads/${file}`, size: body.length };
+  const url = `/media/uploads/${file}`;
+  const kind = /^(jpg|jpeg|png|webp)$/.test(ext) ? 'image' : /^(mp4|mov|webm)$/.test(ext) ? 'video' : 'audio';
+  const requested = String(query.get('filename') || '').replace(/[\\/\x00-\x1f\x7f]/g, '').trim().slice(0, 160);
+  const material = { id: newId('mat'), url, name: requested || `素材.${ext}`, kind, size: body.length, contentType: String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase(), createdAt: Date.now() };
+  if (!Array.isArray(space.materials)) space.materials = [];
+  space.materials.unshift(material);
+  space.save('materials');
+  return { url, size: body.length, material };
 });

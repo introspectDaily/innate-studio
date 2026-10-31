@@ -7,6 +7,7 @@ import { AIHUBMIX, ARK, DOUBAO_SPEECH, MINIMAX, VOLC_BILLING } from '../../share
 import { fmtCredits, fmtTime } from './format.ts';
 import { Segmented, FormRow } from './ui/controls.tsx';
 import { toast, openMenu, openModal, confirmDialog, copyText } from './ui/layers.tsx';
+import { TosSettings } from './tos.tsx';
 
 const amount = (n: number) => n.toLocaleString('zh-CN', { maximumFractionDigits: 2 });
 const message = (err: unknown) => (err as Error).message;
@@ -67,6 +68,7 @@ export default function Admin() {
       </section>
 
       <BillingKey />
+      <TosSettings />
       <p className="settings-hint">{state.app.hosted ? '密钥仅保存在服务器，成员不可见。' : '密钥仅保存在本地。'}</p>
     </div>
   );

@@ -4,7 +4,7 @@
 // 这个文件只是入口：收请求、找到对应的接口、把文件发出去。各部分在 server/ 里：
 //   config.js 固定设置    store.js 磁盘上的数据    keys.js API Key
 //   ark.js 调用火山方舟    speech.js 豆包语音    billing.js 费用中心
-//   media.js 本机文件    tasks.js 生成记录的轮询和落盘    thumbs.js 缩略图
+//   media.js 本机文件    tos.js 火山引擎对象存储    tasks.js 生成记录的轮询和落盘    thumbs.js 缩略图
 //   auth.js 账号和登录    spaces.js 每个请求用哪一份数据    routes/ 各组接口
 // 两种用法：本机模式（默认）不用登录，只接受本机页面的请求；建了账号（pnpm user）就是多人模式，要登录，各人的数据分开。
 // 服务本身不依赖第三方包。页面是 web/ 里的 React 源码，用 pnpm build 构建到 web/dist 之后由这里托管。
@@ -23,6 +23,8 @@ import './server/routes/account.js';
 import './server/routes/generate.js';
 import './server/routes/text.js';
 import './server/routes/library.js';
+import './server/routes/tos.js';
+import './server/routes/materials.js';
 import './server/routes/users.js';
 
 // 启动时把每份数据都打开：没跑完的任务要接着查。

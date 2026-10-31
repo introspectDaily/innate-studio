@@ -31,7 +31,7 @@ export function withLocalFiles(space, payload) {
   for (const field of ['frame_images', 'input_references']) {
     if (!Array.isArray(payload[field])) continue;
     next[field] = payload[field].map((entry) => {
-      // 参考视频只收公网的 https 链接：火山方舟的参考视频不能内嵌。
+      // 参考视频在 routes/generate.js 里已经按需换成公网直链；这里只做最后一道校验。
       if (entry?.video_url) {
         if (!/^https:\/\//i.test(entry.video_url.url || '')) throw new HttpError(400, 'invalid_request', '参考视频须为可公开访问的 https 链接');
         return entry;

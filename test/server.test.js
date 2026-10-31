@@ -10,10 +10,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { estimateCost } from '../shared/models.ts';
 import { startMock, MOCK_ARK_KEY, MOCK_AIHUBMIX_KEY, MOCK_AIHUBMIX_MANAGE_KEY, MOCK_MINIMAX_KEY, MOCK_SPEECH_KEY, MOCK_ACCESS_KEY } from './mock-ark.js';
+import { startTosMock, MOCK_TOS_ACCESS_KEY_ID, MOCK_TOS_SECRET_ACCESS_KEY, MOCK_TOS_BUCKET } from './mock-tos.js';
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const hasFfmpeg = spawnSync('ffmpeg', ['-version']).status === 0;
 let mock;
+let mockTos;
 let app;
 let base;
 let dataDir;
@@ -86,6 +88,7 @@ const refreshUntil = (id, done, what) =>
 
 before(async () => {
   mock = await startMock({ taskSeconds: 0.5 });
+  mockTos = await startTosMock();
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'innate-test-'));
   // 以前别的平台留下的记录：一条没跑完的，一条跑完并存到本机的。
   fs.writeFileSync(path.join(dataDir, 'history.json'), JSON.stringify([
@@ -98,7 +101,7 @@ before(async () => {
     cwd: root,
     stdio: 'ignore',
     // Key 的环境变量都置空：即使本机设置了真实 Key，测试也绝不会用到它。
-    env: { ...process.env, PORT: String(port), ARK_BASE_URL: mock.url, DOUBAO_SPEECH_BASE_URL: mock.url, VOLC_BILLING_BASE_URL: mock.url, MINIMAX_BASE_URL: mock.url, MINIMAX_CN_API_KEY: '', AIHUBMIX_BASE_URL: mock.url, AIHUBMIX_API_KEY: '', AIHUBMIX_MANAGE_KEY: '', ARK_API_KEY: '', DOUBAO_SPEECH_API_KEY: '', VOLC_ACCESS_KEY_ID: '', VOLC_SECRET_ACCESS_KEY: '', INNATE_DATA_DIR: dataDir, INNATE_PENDING_LIMIT_MS: '1500' },
+    env: { ...process.env, PORT: String(port), ARK_BASE_URL: mock.url, DOUBAO_SPEECH_BASE_URL: mock.url, VOLC_BILLING_BASE_URL: mock.url, MINIMAX_BASE_URL: mock.url, MINIMAX_CN_API_KEY: '', AIHUBMIX_BASE_URL: mock.url, AIHUBMIX_API_KEY: '', AIHUBMIX_MANAGE_KEY: '', ARK_API_KEY: '', DOUBAO_SPEECH_API_KEY: '', VOLC_ACCESS_KEY_ID: '', VOLC_SECRET_ACCESS_KEY: '', TOS_ACCESS_KEY_ID: MOCK_TOS_ACCESS_KEY_ID, TOS_SECRET_ACCESS_KEY: MOCK_TOS_SECRET_ACCESS_KEY, TOS_FORCE_PATH_STYLE: '1', INNATE_DATA_DIR: dataDir, INNATE_PENDING_LIMIT_MS: '1500' },
   });
   await waitFor(async () => (await fetch(`${base}/api/state`)).ok, '服务启动');
 });
@@ -106,6 +109,7 @@ before(async () => {
 after(async () => {
   app?.kill();
   await mock?.close();
+  await mockTos?.close();
   if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
@@ -196,6 +200,99 @@ test('页面能打开，目录穿越和跨站请求被拦截', async () => {
   assert.equal(notJson.status, 415);
 });
 
+test('TOS 素材库：只校验已有 Bucket，配置、上传、列表、重命名和删除都限制在 prefix 内', async () => {
+  const initial = await call('GET', '/api/tos/config');
+  assert.equal(initial.status, 200);
+  assert.equal(initial.data.configured, false);
+  assert.equal(initial.data.hasCredentials, true);
+
+  // 不存在的 Bucket 直接拒绝，而且不能悄悄创建。
+  const missing = await call('PUT', '/api/tos/config', { bucket: 'bucket-does-not-exist', prefix: 'studio', region: 'cn-beijing', endpoint: mockTos.url });
+  assert.equal(missing.status, 400, JSON.stringify(missing.data));
+  assert.equal(missing.data.error.code, 'tos_bucket_not_found');
+  assert.equal(mockTos.buckets.has('bucket-does-not-exist'), false);
+
+  const saved = await call('PUT', '/api/tos/config', { bucket: MOCK_TOS_BUCKET, prefix: 'studio-assets', region: 'cn-beijing', endpoint: mockTos.url, publicBaseUrl: 'https://media.example.com' });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.data.configured, true);
+  assert.equal(saved.data.bucket, MOCK_TOS_BUCKET);
+  assert.equal(saved.data.prefix, 'studio-assets');
+  assert.equal(saved.data.hasCredentials, true);
+  assert.equal(saved.data.publicBaseUrl, 'https://media.example.com');
+  assert.equal(JSON.stringify(saved.data).includes(MOCK_TOS_SECRET_ACCESS_KEY), false);
+  assert.equal(mockTos.buckets.get(MOCK_TOS_BUCKET).has('studio-assets/.keep'), true);
+
+  const uploadedResponse = await fetch(`${base}/api/tos/objects?filename=clip.mp4`, { method: 'POST', headers: { 'Content-Type': 'video/mp4' }, body: Buffer.from('mock video') });
+  const uploaded = await uploadedResponse.json();
+  assert.equal(uploadedResponse.status, 200, JSON.stringify(uploaded));
+  assert.match(uploaded.key, /^studio-assets\/uploads\/\d{4}-\d{2}-\d{2}\/[0-9a-f]+-clip\.mp4$/);
+  assert.match(uploaded.url, /^https:\/\/media\.example\.com\/studio-assets\/uploads\//);
+  assert.equal(mockTos.buckets.get(MOCK_TOS_BUCKET).get(uploaded.key).acl, 'public-read');
+
+  const listed = await call('GET', '/api/tos/objects');
+  assert.equal(listed.status, 200);
+  assert.equal(listed.data.items.some((item) => item.key === uploaded.key), true);
+  assert.equal(listed.data.items.some((item) => item.key.endsWith('/.keep')), false);
+
+  const renamed = await call('PUT', '/api/tos/objects', { key: uploaded.key, name: 'videos/final.mp4' });
+  assert.equal(renamed.status, 200);
+  assert.equal(renamed.data.key, 'studio-assets/videos/final.mp4');
+  assert.equal(mockTos.buckets.get(MOCK_TOS_BUCKET).has('studio-assets/videos/final.mp4'), true);
+  assert.equal(mockTos.buckets.get(MOCK_TOS_BUCKET).has(uploaded.key), false);
+
+  const escaped = await call('DELETE', `/api/tos/objects?key=${encodeURIComponent('some-other-prefix/file.mp4')}`);
+  assert.equal(escaped.status, 400);
+  assert.equal(escaped.data.error.code, 'invalid_object_name');
+
+  const removed = await call('DELETE', `/api/tos/objects?key=${encodeURIComponent(renamed.data.key)}`);
+  assert.equal(removed.status, 204);
+  assert.equal(mockTos.buckets.get(MOCK_TOS_BUCKET).has(renamed.data.key), false);
+});
+
+test('本地素材：默认存本机；发布到 TOS 并复用有效链接', async () => {
+  // 先配好 TOS：分享和参考直链都走它。
+  const configured = await call('PUT', '/api/tos/config', { bucket: MOCK_TOS_BUCKET, prefix: 'studio-assets', region: 'cn-beijing', endpoint: mockTos.url, publicBaseUrl: 'https://media.example.com' });
+  assert.equal(configured.status, 200, JSON.stringify(configured.data));
+
+  const uploadedResponse = await fetch(`${base}/api/uploads?filename=${encodeURIComponent('multipart-本地小猫.png')}`, { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: PNG });
+  const uploaded = await uploadedResponse.json();
+  assert.equal(uploadedResponse.status, 200);
+  assert.equal(uploaded.material.name, 'multipart-本地小猫.png');
+  const materialUrl = uploaded.url;
+
+  const listed = await call('GET', '/api/materials');
+  assert.equal(listed.status, 200);
+  const material = listed.data.items.find((item) => item.url === materialUrl);
+  assert.ok(material);
+  assert.equal(material.kind, 'image');
+  assert.deepEqual(material.publications, []);
+
+  const renamed = await call('PUT', `/api/materials/${material.id}`, { name: '主视觉小猫' });
+  assert.equal(renamed.status, 200);
+  assert.equal(renamed.data.name, '主视觉小猫');
+
+  const publishedPuts = () => mockTos.log.filter((entry) => entry.method === 'PUT' && decodeURIComponent(entry.pathname).includes('/published/')).length;
+  const beforePut = publishedPuts();
+  const published = await call('POST', '/api/materials/publish', { url: materialUrl, purpose: 'share' });
+  assert.equal(published.status, 200, JSON.stringify(published.data));
+  assert.equal(published.data.provider, 'tos');
+  assert.match(published.data.url, /^https:\/\/media\.example\.com\/studio-assets\/published\/\d{4}-\d{2}-\d{2}\/[0-9a-f]+-up_[0-9a-f]+\.png$/);
+  assert.equal(published.data.direct, true);
+  assert.equal(publishedPuts(), beforePut + 1);
+
+  // 有效期内再次发布直接复用，不会重新上传。
+  const reused = await call('POST', '/api/materials/publish', { url: materialUrl, purpose: 'share' });
+  assert.equal(reused.status, 200);
+  assert.equal(reused.data.reused, true);
+  assert.equal(reused.data.url, published.data.url);
+  assert.equal(publishedPuts(), beforePut + 1);
+
+  const removed = await call('DELETE', `/api/materials/${material.id}`);
+  assert.equal(removed.status, 204);
+  assert.equal(fs.existsSync(path.join(dataDir, 'uploads', path.basename(materialUrl))), false);
+  assert.equal((await call('GET', '/api/materials')).data.items.some((item) => item.url === materialUrl), false);
+});
+
 test('提交视频：换成 content 数组，本机的首帧内嵌进去；完成后把结果存到本机，用量是 token', async () => {
   const { url } = (await upload()).data;
   assert.match(url, /^\/media\/uploads\/up_[0-9a-f]+\.png$/);
@@ -234,11 +331,11 @@ test('提交视频：换成 content 数组，本机的首帧内嵌进去；完�
 
   // 指向不存在的本机文件：直接说明，不发给平台。
   const missing = await call('POST', '/api/videos', { payload: videoPayload('x', { frame_images: [{ type: 'image_url', image_url: { url: '/media/uploads/up_none.png' }, frame_type: 'first_frame' }] }) });
-  assert.equal(missing.status, 400);
+  assert.equal(missing.status, 400, JSON.stringify(missing.data));
   assert.equal(missing.data.error.code, 'file_not_found');
 });
 
-test('参考生成：图片、视频、音频各有各的 role；参考视频只能是公网链接', async () => {
+test('参考生成：图片、视频、音频各有各的 role；本机参考视频先上传 TOS', async () => {
   const { url } = (await upload()).data;
   const refs = [
     { type: 'image_url', image_url: { url } },
@@ -261,10 +358,20 @@ test('参考生成：图片、视频、音频各有各的 role；参考视频只
   assert.equal(inlined.role, 'reference_audio');
   assert.match(inlined.audio_url.url, /^data:audio\/mp3;base64,/);
 
-  const before = sent('/contents/generations/tasks').length;
-  const local = await call('POST', '/api/videos', { payload: videoPayload('延长', { input_references: [{ type: 'video_url', video_url: { url: '/media/videos/a.mp4' } }] }) });
-  assert.equal(local.status, 400);
-  assert.equal(sent('/contents/generations/tasks').length, before);
+  // 本机参考视频先上传到 TOS，Ark 请求里只出现公网 https/http 地址；记录里仍保留原来的 /media 短地址。
+  const localVideo = (await upload(Buffer.from('mock local video'), 'video/mp4')).data.url;
+  const local = await call('POST', '/api/videos', { payload: videoPayload('延长', { input_references: [{ type: 'video_url', video_url: { url: localVideo } }] }) });
+  assert.equal(local.status, 200, JSON.stringify(local.data));
+  const localRequest = sent('/contents/generations/tasks').at(-1);
+  assert.match(localRequest.content.at(-1).video_url.url, /^https:\/\/media\.example\.com\/studio-assets\/references\/\d{4}-\d{2}-\d{2}\/[0-9a-f]+-up_[0-9a-f]+\.mp4$/);
+  const afterFirst = mockTos.log.filter((entry) => entry.method === 'PUT' && entry.pathname.includes('/references/')).length;
+
+  // 再次生成：TOS 链接仍有效，不重复上传。
+  const again = await call('POST', '/api/videos', { payload: videoPayload('再延长一次', { input_references: [{ type: 'video_url', video_url: { url: localVideo } }] }) });
+  assert.equal(again.status, 200, JSON.stringify(again.data));
+  assert.equal(mockTos.log.filter((entry) => entry.method === 'PUT' && entry.pathname.includes('/references/')).length, afterFirst);
+  assert.equal(sent('/contents/generations/tasks').at(-1).content.at(-1).video_url.url, localRequest.content.at(-1).video_url.url);
+  assert.equal(local.data.payload.input_references[0].video_url.url, localVideo);
 });
 
 test('登记之外的型号不发出去；平台拒绝、模型没开通、任务失败，都把原因带回来', async () => {

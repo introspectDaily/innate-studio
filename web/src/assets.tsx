@@ -1,13 +1,13 @@
 // 素材的界面：缩略图、上传面板、选择素材的弹窗。文件处理在 media.ts。
 
 import { useEffect, useRef, useState } from 'react';
-import { state, useStore, KINDS, loadCharacters } from './store.ts';
+import { api, state, useStore, KINDS, loadCharacters } from './store.ts';
 import { kindOfFile, uploadLocalFile, refFromRecord, recordName, type Progress } from './media.ts';
 import { fmtTime, fmtBytes } from './format.ts';
 import { toast, openModal } from './ui/layers.tsx';
-import { Segmented, tip } from './ui/controls.tsx';
+import { SearchBox, Segmented, tip } from './ui/controls.tsx';
 import { refsFromCharacter } from './composer/state.ts';
-import type { HistoryItem, Kind, Ref } from './types.ts';
+import type { HistoryItem, Kind, Ref, TosObjectList } from './types.ts';
 
 const message = (err: unknown) => (err as Error).message;
 
@@ -126,8 +126,8 @@ export function UploadPane<T>({ kind, limit = 1, upload, onUploaded, onAllDone, 
 
 // ---------- 选择素材的弹窗（创作页用） ----------
 
-type Source = 'upload' | 'records' | 'character';
-const SOURCE_LABELS: Record<Source, string> = { upload: '本地上传', records: '生成记录', character: '角色' };
+type Source = 'upload' | 'tos' | 'records' | 'character';
+const SOURCE_LABELS: Record<Source, string> = { upload: '本地上传', tos: 'TOS 素材', records: '生成记录', character: '角色' };
 
 interface PickerOptions {
   // 只选一种素材时给 kind 和 remaining。几种都能选时给 limits（每种还能加几个）：不用先选类型，上传的、选中的是什么就算什么。
@@ -197,6 +197,54 @@ function CharacterGrid({ remaining, onPick }: { remaining: number; onPick: (refs
   );
 }
 
+
+// TOS 素材库里的公网素材。参考视频本来就是公网地址，选中后直接交给生成接口。
+function TosGrid({ kinds, usedUrls, onPick }: { kinds: Kind[]; usedUrls: string[]; onPick: (ref: Ref) => void }) {
+  const [items, setItems] = useState<TosObjectList['items']>([]);
+  const [query, setQuery] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let live = true;
+    api<TosObjectList>('GET', '/api/tos/objects?limit=200')
+      .then((data) => live && setItems(data.items))
+      .catch((err) => live && setError(message(err)))
+      .finally(() => live && setLoading(false));
+    return () => {
+      live = false;
+    };
+  }, []);
+  const list = items.filter((item) => kinds.includes(item.kind) && (!query || item.name.toLowerCase().includes(query)));
+  function choose(item: TosObjectList['items'][number]) {
+    onPick({ uid: crypto.randomUUID(), kind: item.kind, source: 'url', url: item.url, name: item.name.split('/').at(-1) || item.name, thumb: item.kind === 'image' ? item.url : null });
+  }
+  if (loading) return <div className="empty small-empty">读取素材库…</div>;
+  if (error) return <div className="empty small-empty">{error}</div>;
+  return (
+    <>
+      <div className="picker-tos-toolbar">
+        <SearchBox label="搜索 TOS 素材" onQuery={(value) => setQuery(value)} />
+        <span className="muted small">共 {list.length} 个可用素材</span>
+      </div>
+      {list.length ? (
+        <div className="pick-grid">
+          {list.map((item) => (
+            <button key={item.key} className="pick-card" type="button" disabled={usedUrls.includes(item.url)} {...tip(item.name)} onClick={() => choose(item)}>
+              <div className="pick-thumb">
+                {item.kind === 'image' ? <Thumb thumb={item.url} kind="image" /> : item.kind === 'video' ? <video className="thumb-img" src={item.url} preload="metadata" muted playsInline /> : <div className="thumb-fallback">音频</div>}
+              </div>
+              <div className="pick-name ellipsis">{item.name.split('/').at(-1)}</div>
+              {usedUrls.includes(item.url) ? <span className="badge badge-ok">已添加</span> : <span className="badge badge-pending">TOS</span>}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="empty small-empty">{query ? '没有匹配的素材' : 'TOS 素材库里还没有这类素材'}</div>
+      )}
+    </>
+  );
+}
+
 function AssetPicker({ kind, remaining = 1, limits, usedUrls = [], onPick, sources, close }: PickerOptions & { sources: Source[]; close: () => void }) {
   const [tab, setTab] = useState(sources[0]);
   // 每种素材还能加几个。选一个少一个。
@@ -228,6 +276,7 @@ function AssetPicker({ kind, remaining = 1, limits, usedUrls = [], onPick, sourc
       {/* 换来源时弹窗的大小不变：这一块固定高，内容多了在里面滚 */}
       <div className="tab-pane picker-pane">
         {tab === 'upload' && <UploadPane<Ref> kind={several ? null : kinds[0] || kind || null} limit={room} upload={upload} onUploaded={pick} onAllDone={close} />}
+        {tab === 'tos' && <TosGrid kinds={kinds} usedUrls={usedUrls} onPick={pickAndClose} />}
         {tab === 'records' && <RecordGrid kinds={kinds} usedUrls={usedUrls} onPick={pickAndClose} />}
         {tab === 'character' && (
           <CharacterGrid
@@ -246,6 +295,6 @@ function AssetPicker({ kind, remaining = 1, limits, usedUrls = [], onPick, sourc
 export function openAssetPicker(options: PickerOptions) {
   const kinds = options.limits ? (Object.keys(options.limits) as Kind[]) : [options.kind!];
   // 角色的参考图是图片，所以只在能选图片时出现。
-  const sources: Source[] = options.sources ?? ['upload', 'records', ...(kinds.includes('image') ? (['character'] as const) : [])];
+  const sources: Source[] = options.sources ?? ['upload', 'records', 'tos', ...(kinds.includes('image') ? (['character'] as const) : [])];
   const modal = openModal({ title: options.title || (kinds.length > 1 ? '添加参考素材' : `添加${KINDS[kinds[0]].label}`), size: 'md', content: <AssetPicker {...options} sources={sources} close={() => modal.close()} /> });
 }
