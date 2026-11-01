@@ -65,6 +65,7 @@ export default function Admin() {
           <AihubmixKey />
           <SpeechKey />
           <AutodlKey />
+          <RunninghubKeys />
         </div>
       </section>
 
@@ -537,6 +538,113 @@ function AutodlKey() {
       onSave={save}
       onRemove={remove}
     />
+  );
+}
+
+// RunningHub：一组 Key，按并发路由。Key 从环境变量指的那个 JSON 文件读，页面上只能看（改文件即可，不用重启）。
+// 每个 Key 只露头尾：管理面板是给管理员看的，但截图、录屏、投屏时也不该把整串 Key 露出去。
+// 站点：RunningHub 有国内站（runninghub.cn）和海外站（runninghub.ai），两个站的 Key、工作流 id 都不通用，
+// 所以每个 Key 旁边标出它属于哪个站，工作流也按站点分别显示配没配 id。
+interface RhPool {
+  configured: boolean;
+  source: string;
+  envVar: string;
+  error: string;
+  total: number;
+  concurrency: number;
+  running: number;
+  sites: { site: string; label: string; host: string; keys: number; concurrency: number }[];
+  keys: { title: string; hint: string; site: string; siteLabel: string; concurrency: number; running: number; full: boolean }[];
+  workflows: { key: string; name: string; kind: string; ids: Record<string, string>; ready: boolean; missing: string[] }[];
+}
+
+// 站点标签：老版服务端没有 sites 字段时兜底。
+const RH_SITE_FALLBACK: Record<string, string> = { cn: '国内站', ai: '海外站' };
+
+function RunninghubKeys() {
+  const [pool, setPool] = useState<RhPool | null>(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function load(showToast = false) {
+    setBusy(true);
+    try {
+      setPool(await api<RhPool>('GET', '/api/runninghub/keys'));
+      setError('');
+      if (showToast) toast('已刷新', 'success');
+    } catch (err) {
+      setError(message(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const envName = pool?.envVar || 'RUNNINGHUB_KEYS_FILE';
+  const siteLabel = (site: string) => pool?.sites.find((item) => item.site === site)?.label || RH_SITE_FALLBACK[site] || site;
+  const sites = pool?.sites?.length ? pool.sites : [{ site: 'cn', label: '国内站' }, { site: 'ai', label: '海外站' }];
+
+  return (
+    <FormRow
+      label="RunningHub 密钥池"
+      desc={
+        <>
+          ComfyUI 工作流（海螺 H3 人物替换等）用它。Key 配在环境变量 <span className="mono">{envName}</span> 指向的 JSON 文件里，支持多个、各带自己的并发数和站点（<span className="mono">site</span>：<span className="mono">cn</span> 国内站 / <span className="mono">ai</span> 海外站），一个占满就换下一个。
+        </>
+      }
+    >
+      <div className="rh-pool">
+        {(error || pool?.error) && <span className="muted">{error || pool?.error}</span>}
+        {!error && !pool && <span className="muted">读取中…</span>}
+        {pool && !pool.configured && (
+          <span className="muted">
+            还没有配置{pool.source ? `（${pool.source} 里没读到可用的 Key）` : ''}。文件里可以写{' '}
+            <span className="mono">["key-1", "key-2"]</span> 或者{' '}
+            <span className="mono">[{'{'}"title": "国内主账号", "key": "…", "site": "cn", "concurrency": 2{'}'}]</span>。
+          </span>
+        )}
+        {pool?.keys.map((key) => (
+          <div className="rh-pool-row" key={`${key.title}-${key.hint}`}>
+            <span className="rh-pool-title ellipsis">{key.title}</span>
+            <span className="badge badge-pending">{key.siteLabel || siteLabel(key.site)}</span>
+            <span className="mono muted">{key.hint}</span>
+            <span className={`badge ${key.full ? 'badge-pending' : 'badge-ok'}`}>{`${key.running}/${key.concurrency}`}</span>
+            {key.full && <span className="muted">已满</span>}
+          </div>
+        ))}
+        {pool?.configured && (
+          <div className="rh-pool-foot">
+            <span className="muted">{`共 ${pool.total} 个 Key，可并行 ${pool.concurrency} 个，正在跑 ${pool.running} 个`}</span>
+            {pool.sites?.map((site) => (
+              <span className="muted" key={site.site}>{`${site.label} ${site.keys} 个`}</span>
+            ))}
+            {pool.source && <span className="muted ellipsis">{`来源：${pool.source}`}</span>}
+            <button className="btn btn-sm" type="button" disabled={busy} onClick={() => load(true)}>
+              刷新
+            </button>
+          </div>
+        )}
+        {pool?.workflows.length ? (
+          <div className="rh-pool-flows">
+            {pool.workflows.map((workflow) => (
+              <div className="rh-pool-row" key={workflow.key}>
+                <span className="rh-pool-title ellipsis">{workflow.name}</span>
+                {workflow.ready ? (
+                  <span className="mono muted">
+                    {sites.map((site) => `${site.label} ${workflow.ids?.[site.site] || '未配'}`).join(' · ')}
+                  </span>
+                ) : (
+                  <span className="muted">{`未配置工作流 ID：${workflow.missing.join(' / ')}`}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </FormRow>
   );
 }
 

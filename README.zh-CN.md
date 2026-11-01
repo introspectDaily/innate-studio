@@ -110,6 +110,19 @@ Innate Studio 以**火山引擎**为主线，同时接入 **MiniMax** 与 **AiHu
 | **MiniMax** | `MINIMAX_CN_API_KEY` | 视频生成（文生视频、首尾帧、全能参考） | `MiniMax H3`、`MiniMax H3 Max` |
 | **AiHubMix** | `AIHUBMIX_API_KEY`<br>`AIHUBMIX_MANAGE_KEY`*(查余额)* | 图片生成（文生图、多图参考）、账户余额查询 | `GPT Image 2.5 Sunburst`<br>`GPT Image 2.5 Flare`<br>`Nano Banana 2.1` |
 | **火山费用中心** | `VOLC_ACCESS_KEY_ID`<br>`VOLC_SECRET_ACCESS_KEY` | 火山引擎账户实时余额查询 | — |
+| **RunningHub** | `RUNNINGHUB_KEYS_FILE`<br>`RUNNINGHUB_API_KEY`*(单 Key)* | 云端 ComfyUI 工作流（图生视频、人物替换等） | 由登记表决定，见 [工作流平台文档](docs/runninghub-workflows.md) |
+
+### 🧩 工作流平台（RunningHub / AutoDL ComfyUI）
+
+除内置模型外，平台还能接入**自建或云端 ComfyUI 工作流**：工作流的输入槽位被编译成与内置模型完全一致的 `input_rules`，因此画布节点、创作界面、计价、预扣与结算全部复用同一条链路，前端无需为每个工作流写代码。
+
+接入点采取**逐条登记、不用通用方案**的策略——ComfyUI 的 HTTP API 只能改节点字段值，无法增删节点或改连线，所以"少收一张图"这类需求由登记表的槽位定义与填充策略实现，而非改工作流本身。新增一条工作流的方式是往 `shared/runninghub.ts` 的 `RH_WORKFLOWS` 里加一项（节点 id、字段名、参数范围、机器档位与估价），详见 [docs/runninghub-workflows.md](docs/runninghub-workflows.md)。
+
+- **机器档位**：RunningHub 支持 `default`(24G) / `plus`(48G) / `ultra`(84G)，登记表里声明可选档位后，画布节点与创作界面会多出一个下拉框；档位越界会被平台拒绝（错误码 435），因此登记时必须与实际工作流一致。
+- **国内站与海外站**：平台分 `runninghub.cn` 与 `runninghub.ai` 两个独立站点——账号、Key、工作流 ID、素材库都不通用。每个 Key 用 `site` 字段声明归属（枚举 `cn` / `ai`），请求（提交、素材上传、任务查询）按它打到对应域名；工作流 ID 也可以按站点分别配置，调度时只会挑「该站点上配了这个工作流」的 Key。
+- **多 Key 池与并发路由**：Key 从环境变量指向的 JSON 文件读取（也可直接注入 JSON 文本或单个 Key），支持 `["k1","k2"]`、`[{title,key,site,concurrency}]` 等写法，无 `title` 的按序号命名，无 `site` 的按 `RUNNINGHUB_SITE`（默认国内站）。每个 Key 默认并发 1，当前 Key 占满即轮转到下一个，全部占满则排队等待（默认 15 秒）后报忙；服务重启后会依据历史任务里的 Key 归属与站点还原占位，避免并发被低估。
+- **Key 保护**：管理面板只展示 Key 的标题、首尾各 4 位、所属站点与占用情况，完整 Key 永不出现在任何接口响应里；Key 身份标识由 Key 内容散列派生，改标题不会打乱并发归属。
+- **计费**：优先采用平台回传的 `usage.consumeMoney`，缺失时回落到登记表的 `estimate`（按机器档位区分）。
 
 ---
 
@@ -208,6 +221,7 @@ flowchart TD
         Server["server.js + server/ 模块化路由"]
         Auth["auth.js / spaces.js / credits.js (账号、多租户与积分账本)"]
         Registry["shared/models.ts (统一模型规范、计费估算与润色规则)"]
+        Pool["server/runninghub.js (多 Key 池、并发租约与素材上传)"]
     end
 
     subgraph Cloud["云端模型生态"]
@@ -215,6 +229,7 @@ flowchart TD
         Speech["豆包语音 (Seed-TTS 2.0 / Seed-Audio 1.0)"]
         MM["MiniMax 开放平台 (MiniMax H3)"]
         AHM["AiHubMix (GPT Image 2.5 / Nano Banana 2.1)"]
+        RH["RunningHub / 自建 ComfyUI 工作流 (按 machine 档位调度)"]
     end
 
     subgraph Storage["持久化存储 (data/)"]
@@ -226,7 +241,8 @@ flowchart TD
     Client -->|同源 HTTP API & 媒体流| Core
     Core --> Auth
     Core --> Registry
-    Core --> Ark & Speech & MM & AHM
+    Core --> Pool
+    Core --> Ark & Speech & MM & AHM & RH
     Core --> Storage
 ```
 
@@ -248,6 +264,8 @@ flowchart TD
 | `data/videos/` `images/` `audio/` | 生成完成自动落盘保存的视频、图像与音频文件 |
 | `data/uploads/` `thumbs/` | 用户上传的参考素材与自动生成的列表缩略图 |
 | `data/materials.json` / `publications.json` | 本地素材元数据与按需生成的公网链接缓存 |
+
+> RunningHub 的 Key 文件**不落在** `data/` 内：由 `RUNNINGHUB_KEYS_FILE` 指向任意路径（或 `RUNNINGHUB_KEYS` 直接注入 JSON 文本、`RUNNINGHUB_API_KEY` 配置单 Key），便于容器部署时挂载 Secret 而不进入数据备份。
 
 ---
 

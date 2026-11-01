@@ -663,6 +663,7 @@ function FlowPicker({ onPick }: { onPick: (uuid: string) => void }) {
                 <div className="pick-badges">
                   <span className="badge badge-pending">{item.fromCredits != null ? `起 ${item.fromCredits} 积分` : '按量计费'}</span>
                   {needs && <span className="badge badge-ok">{needs}</span>}
+                  {item.provider === 'runninghub' && <span className="badge badge-ok">RunningHub</span>}
                 </div>
               </button>
             );
@@ -761,7 +762,7 @@ function FlowToolbar() {
       <>
         <button className="dropdown dropdown-tool" type="button" disabled={!enabled || !ready} onClick={() => pickWorkflow(!state.flows.loaded)}>
           <Icon name="workflow" />
-          <span>{enabled ? (state.flows.loaded ? `工作流 · 共 ${state.flows.total} 个` : '读取工作流…') : '未配置 AutoDL.art 令牌'}</span>
+          <span>{enabled ? (state.flows.loaded ? `工作流 · 共 ${state.flows.total} 个` : '读取工作流…') : '未配置工作流平台'}</span>
         </button>
         {!enabled && canManage() && (
           <button className="entry-action-btn" type="button" onClick={openAdmin}>

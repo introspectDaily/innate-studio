@@ -110,6 +110,19 @@ Innate Studio centers on **Volcengine** while integrating **MiniMax** and **AiHu
 | **MiniMax** | `MINIMAX_CN_API_KEY` | Video generation (T2V, first/last frame, omni-reference) | `MiniMax H3`, `MiniMax H3 Max` |
 | **AiHubMix** | `AIHUBMIX_API_KEY`<br>`AIHUBMIX_MANAGE_KEY` *(balance)* | Image generation (T2I, multi-image reference), account balance | `GPT Image 2.5 Sunburst`<br>`GPT Image 2.5 Flare`<br>`Nano Banana 2.1` |
 | **Volcengine Billing** | `VOLC_ACCESS_KEY_ID`<br>`VOLC_SECRET_ACCESS_KEY` | Real-time Volcengine account balance query | — |
+| **RunningHub** | `RUNNINGHUB_KEYS_FILE`<br>`RUNNINGHUB_API_KEY` *(single key)* | Cloud ComfyUI workflows (image-to-video, character swap, …) | Driven by the registry — see [workflow platform docs](docs/runninghub-workflows.md) |
+
+### 🧩 Workflow Platforms (RunningHub / AutoDL ComfyUI)
+
+Beyond the built-in models, the app can drive **self-hosted or cloud ComfyUI workflows**. Each workflow's input slots are compiled into the exact same `input_rules` shape used by built-in models, so canvas nodes, the composer, quoting, credit holds and settlement all reuse one code path — the frontend needs no per-workflow code.
+
+Onboarding is deliberately **per-workflow, not generic**: the ComfyUI HTTP API can only change node field values and cannot add/remove nodes or rewire edges, so requests like "only accept two reference images" are met by slot definitions plus a fill policy inside the registry, not by editing the workflow. Adding a workflow means appending one entry to `RH_WORKFLOWS` in `shared/runninghub.ts` (node ids, field names, parameter ranges, machine tiers, estimate) — see [docs/runninghub-workflows.md](docs/runninghub-workflows.md).
+
+- **Machine tiers**: RunningHub offers `default` (24G) / `plus` (48G) / `ultra` (84G). Declaring tiers in the registry surfaces a dropdown in both canvas nodes and the composer; a mismatched tier is rejected by the platform (error 435), so the registry must match the real workflow.
+- **China and international sites**: the platform runs as two independent sites — `runninghub.cn` and `runninghub.ai` — with separate accounts, keys, workflow IDs, and media libraries. Every key declares its origin with a `site` field (enum `cn` / `ai`), and all requests (submit, media upload, task polling) go to that host; workflow IDs can be configured per site, and scheduling only picks keys whose site has an ID for the requested workflow.
+- **Multi-key pool & concurrency routing**: keys are read from a JSON file referenced by an env variable (raw JSON text or a single key also work), supporting `["k1","k2"]`, `[{title,key,site,concurrency}]`, and so on; untitled keys get numbered names and keys without `site` fall back to `RUNNINGHUB_SITE` (China site by default). Each key defaults to concurrency 1; when the current key is saturated the pool rotates to the next one, and when all are saturated it waits (15s by default) before reporting busy. On restart, key ownership and site recorded in history restore the leases so concurrency is never under-counted.
+- **Key protection**: the admin panel only renders a key's title, its first/last 4 characters, its site, and its occupancy. Full keys never appear in any API response, and a key's identity hash is derived from its value so renaming never reshuffles leases.
+- **Billing**: uses the platform-reported `usage.consumeMoney` when present, otherwise the registry's `estimate` (per machine tier).
 
 ---
 
@@ -208,6 +221,7 @@ flowchart TD
         Server["server.js + server/ Modular Routes"]
         Auth["auth.js / spaces.js / credits.js (Auth, Multi-Tenancy & Credit Ledger)"]
         Registry["shared/models.ts (Unified Model Specs, Pricing & Prompt Polish Rules)"]
+        Pool["server/runninghub.js (Multi-Key Pool, Concurrency Leases & Media Upload)"]
     end
 
     subgraph Cloud["Cloud Model Ecosystem"]
@@ -215,6 +229,7 @@ flowchart TD
         Speech["Doubao Speech (Seed-TTS 2.0 / Seed-Audio 1.0)"]
         MM["MiniMax Platform (MiniMax H3)"]
         AHM["AiHubMix (GPT Image 2.5 / Nano Banana 2.1)"]
+        RH["RunningHub / Self-Hosted ComfyUI Workflows (scheduled by machine tier)"]
     end
 
     subgraph Storage["Persistent Storage (data/)"]
@@ -226,7 +241,8 @@ flowchart TD
     Client -->|Same-Origin HTTP API & Media Streams| Core
     Core --> Auth
     Core --> Registry
-    Core --> Ark & Speech & MM & AHM
+    Core --> Pool
+    Core --> Ark & Speech & MM & AHM & RH
     Core --> Storage
 ```
 
@@ -247,6 +263,8 @@ All application state is persisted inside `data/` (customizable via `INNATE_DATA
 | `data/skills.json` | User-defined custom prompt engineering skills |
 | `data/videos/` `images/` `audio/` | Automatically persisted video, image, and audio outputs |
 | `data/uploads/` `thumbs/` | User-uploaded reference assets and automatically generated list thumbnails |
+
+> RunningHub key files deliberately live **outside** `data/`: point `RUNNINGHUB_KEYS_FILE` at any path (or inject JSON via `RUNNINGHUB_KEYS`, or a single key via `RUNNINGHUB_API_KEY`) so container deployments can mount it as a secret and keep it out of data backups.
 
 ---
 

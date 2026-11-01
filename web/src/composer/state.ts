@@ -9,6 +9,7 @@ import { toast } from '../ui/layers.tsx';
 import { buildVideoRequest, buildImageRequest, buildSpeechRequest, buildSfxRequest, buildMusicRequest, refsInUse, carryRefs } from '../request.ts';
 import { quoteCost, toCredits, refLimitsOf, type VideoSpec } from '../../../shared/models.ts';
 import { workflowCost, cleanInputs, flowTextKey, flowUuidOf, flowVideoSpec, formValues, isFlowModel, ruleKind, ruleLabel, type InputRule, type WorkflowSummary } from '../../../shared/autodl.ts';
+import { rhCost, rhKeyOfUuid } from '../../../shared/runninghub.ts';
 import type { BuiltRequest, Character, CreateType, FlowSummary, HistoryItem, Kind, Ref, SkillRef, Studio, VideoForm, Voice } from '../types.ts';
 
 // 视频的表单单独存一份（生成记录里存的也是它）；当前选的类型和其余几种的表单存在另一份里。
@@ -187,7 +188,7 @@ export const refLimitOf = (kind: Kind, model = composer.form.model) => refLimits
 // ---------- AutoDL.art 的工作流 ----------
 // 选中的工作流是哪一种、参数规则是什么。规则在选中时从详情接口取一份放在内存里（目录接口不带规则）；
 // 复用记录时用记录里存的那一份，平台之后改了规则也还原得回去。
-type Flow = Pick<WorkflowSummary, 'uuid' | 'name' | 'description' | 'price' | 'price_type' | 'billing_config' | 'input_rules'>;
+type Flow = Pick<WorkflowSummary, 'uuid' | 'name' | 'description' | 'price' | 'price_type' | 'billing_config' | 'input_rules'> & { provider?: string };
 const MAX_FLOWS = 8;
 const flowCache = new Map<string, Flow>();
 const patch = (prev: Record<string, unknown>, next: Record<string, unknown>) => ({ ...prev, ...next });
@@ -207,6 +208,13 @@ export function rememberFlow(flow: Flow) {
 }
 async function fetchFlow(uuid: string, force = false): Promise<Flow | null> {
   if (!force && flowCache.has(uuid)) return flowCache.get(uuid)!;
+  // RunningHub 的工作流：规则是登记表编译出来的，目录里就带着完整定义，不用再取一次（也没有那个接口）。
+  const known = state.flows.items.find((item) => item.uuid === uuid);
+  if (known?.provider === 'runninghub' && known.rules) {
+    const flow = { uuid, name: known.name, description: known.description, input_rules: known.rules, provider: known.provider } as Flow;
+    rememberFlow(flow);
+    return flow;
+  }
   try {
     const { workflow } = await api<{ workflow: WorkflowSummary }>('GET', `/api/autodl/workflows/${encodeURIComponent(uuid)}`);
     rememberFlow(workflow);
@@ -369,7 +377,8 @@ export function flowSeconds(): number {
 export function flowCredits(): number | null {
   const flow = flowDefinition();
   if (!flow) return null;
-  const yuan = workflowCost(flow, lastFlowInputs, flowSeconds());
+  // RunningHub 按任务定价（价位跟着机器档位走）；其余平台按工作流的计费配置算。
+  const yuan = flow.provider === 'runninghub' ? rhCost(rhKeyOfUuid(flow.uuid), lastFlowInputs) : workflowCost(flow, lastFlowInputs, flowSeconds());
   return yuan == null ? null : toCredits(yuan);
 }
 
@@ -859,9 +868,12 @@ export async function submit() {
     if (type === 'video') await api('POST', '/api/videos', { payload: request.payload, form });
     else if (type === 'image') await api('POST', '/api/images', { payload: request.payload, form: { type, ...studio.image } });
     else if (type === 'flow') {
-      // 工作流只给服务端工作流的 uuid 和填的值；素材的地址是记录里的短地址或链接，服务端负责内嵌或换公网直链。
+      // 工作流只给服务端工作流的 uuid 和填的值；素材的地址是记录里的短地址或链接，服务端负责内嵌、换公网直链或上传。
+      // 两家工作流共用一套入参形状，只是提交的接口不同。
       const { workflow, refs, values } = studio.flow;
-      await api('POST', '/api/autodl/submit', { workflow: workflow!.uuid, inputs: request.payload, form: { type, workflow, values, refs } });
+      const provider = state.flows.items.find((item) => item.uuid === workflow?.uuid)?.provider;
+      const endpoint = provider === 'runninghub' ? '/api/runninghub/submit' : '/api/autodl/submit';
+      await api('POST', endpoint, { workflow: workflow!.uuid, inputs: request.payload, form: { type, workflow, values, refs } });
     } else await api('POST', `/api/audio/${type}`, { ...request.body, form: { type, ...studio[type] } });
     toast('已提交', 'success');
     startHistoryLoop();

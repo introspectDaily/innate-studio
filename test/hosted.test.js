@@ -91,7 +91,8 @@ after(async () => {
 
 test('没登录：只读得到「要登录」这件事，别的接口和文件都不给', async () => {
   const state = await call(null, 'GET', '/api/state');
-  assert.deepEqual(state.data, { hasKey: false, hosted: true, user: null });
+  // RunningHub 的 Key 是整组配置的，未登录时只说配没配（这里没配）。
+  assert.deepEqual(state.data, { hasKey: false, runninghub: { hasKey: false }, hosted: true, user: null });
   for (const [method, url] of [['GET', '/api/history'], ['GET', '/api/models'], ['GET', '/api/users'], ['PUT', '/api/key'], ['GET', '/media/images/img_old.jpg']]) {
     const res = await call(null, method, url, method === 'PUT' ? { apiKey: MOCK_ARK_KEY } : undefined);
     assert.equal(res.status, 401, url);
@@ -146,7 +147,9 @@ test('管理员：配 Key、建成员（初始密码只给这一次）；成员�
 
   const state = (await call('小林', 'GET', '/api/state')).data;
   // 成员只知道服务能不能用：接了哪些平台、各自配没配、地址是什么，都不在返回里。
-  assert.deepEqual(Object.keys(state).sort(), ['hasKey', 'hosted', 'user']);
+  assert.deepEqual(Object.keys(state).sort(), ['hasKey', 'hosted', 'runninghub', 'user']);
+  // 成员只知道 RunningHub 配没配，看不到有几个 Key、各自占多少。
+  assert.deepEqual(state.runninghub, { hasKey: false });
   assert.deepEqual([state.hasKey, state.user.role], [true, 'member']);
   for (const [method, url, body] of [['PUT', '/api/key', { apiKey: 'another-key' }], ['DELETE', '/api/key'], ['GET', '/api/credits'], ['GET', '/api/users'], ['POST', '/api/users', { name: 'x' }], ['POST', `/api/users/${state.user.id}/credits`, { amount: 1000 }]]) {
     const res = await call('小林', method, url, body);

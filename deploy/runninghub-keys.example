@@ -1,0 +1,5 @@
+[
+  { "title": "国内主账号", "key": "rh-xxxxxxxxxxxxxxxx", "site": "cn", "concurrency": 2 },
+  { "title": "海外备用号", "key": "rh-yyyyyyyyyyyyyyyy", "site": "ai", "concurrency": 1 },
+  "rh-zzzzzzzzzzzzzzzz"
+]

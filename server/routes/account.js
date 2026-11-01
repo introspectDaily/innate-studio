@@ -8,6 +8,7 @@ import { isHosted, userView } from '../auth.js';
 import { callArk, forgetAccount } from '../ark.js';
 import { minimaxBalance, queryAihubmixBalance, queryBalance } from '../billing.js';
 import { VIDEO_TASKS_PATH } from '../tasks.js';
+import { rhSummary } from '../runninghub.js';
 import { VIDEO_MODELS, IMAGE_MODELS, ARK_TEXT_MODELS, imageProvider, videoProvider } from '../../shared/models.ts';
 
 const KEY_SERVICES = { speech: DOUBAO_SPEECH, minimax: MINIMAX, aihubmix: AIHUBMIX, 'aihubmix-manage': AIHUBMIX_MANAGE, autodl: AUTODL };
@@ -17,8 +18,10 @@ const KEY_SERVICES = { speech: DOUBAO_SPEECH, minimax: MINIMAX, aihubmix: AIHUBM
 route('GET', /^\/api\/state$/, async ({ user }) => {
   const state = keyState();
   const account = { hosted: isHosted(), user: user ? userView(user) : null };
-  if (isHosted() && user?.role !== 'admin') return { hasKey: Boolean(user) && state.hasKey, ...account };
-  return { ...state, ...account };
+  // RunningHub 是一组 Key，state 里只放「配了几个、能并行几个、在跑几个」；完整列表只给管理员（/api/runninghub/keys）。
+  const runninghub = rhSummary();
+  if (isHosted() && user?.role !== 'admin') return { hasKey: Boolean(user) && state.hasKey, runninghub: { hasKey: runninghub.hasKey }, ...account };
+  return { ...state, runninghub, ...account };
 }, 'open');
 
 // service 是 speech 时存的是豆包语音的 Key，是 minimax、aihubmix 时存的是 MiniMax、AiHubMix 的 Key，是 billing 时存的是查余额用的那对 Access Key，其余是火山方舟的 Key。

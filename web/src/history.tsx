@@ -27,11 +27,13 @@ const TYPE_LABELS: Record<CreateType, string> = { video: '视频', image: '图�
 
 const message = (err: unknown) => (err as Error).message;
 
+// 工作流（AutoDL.art 或 RunningHub）提交的记录：参数、素材、复用的方式和普通型号不一样。
+const isFlowItem = (item: HistoryItem) => item.provider === 'autodl' || item.provider === 'runninghub';
 // 这条记录是哪种内容：工作流、视频、图片，或者音频里的语音、音效、配乐。
-const typeOf = (item: HistoryItem): CreateType => (item.provider === 'autodl' ? 'flow' : item.kind === 'audio' ? item.tool! : item.kind);
+const typeOf = (item: HistoryItem): CreateType => (isFlowItem(item) ? 'flow' : item.kind === 'audio' ? item.tool! : item.kind);
 const typeLabel = (item: HistoryItem) => TYPE_LABELS[typeOf(item)];
 // 没有提示词的记录（配乐、只填了素材和参数的工作流）用它的类型或工作流的名字来称呼。
-const nameOf = (item: HistoryItem) => item.prompt || (item.provider === 'autodl' ? item.model : '') || typeLabel(item);
+const nameOf = (item: HistoryItem) => item.prompt || (isFlowItem(item) ? item.model : '') || typeLabel(item);
 const done = (item: HistoryItem) => item.status === 'completed' && Boolean(item.mediaUrl);
 
 const RECENT_COUNT = 6;
@@ -48,7 +50,7 @@ function modeOf(item: HistoryItem) {
 
 function refsOf(item: HistoryItem): Ref[] {
   const f = item.form;
-  if (item.provider === 'autodl') return Object.values((f?.refs || {}) as Record<string, Ref | null>).filter((ref): ref is Ref => Boolean(ref));
+  if (isFlowItem(item)) return Object.values((f?.refs || {}) as Record<string, Ref | null>).filter((ref): ref is Ref => Boolean(ref));
   if (!f || item.kind !== 'video') return [];
   if (f.mode === 'frames') return [f.frames?.first, f.frames?.last].filter(Boolean);
   if (f.mode === 'reference') return [...(f.refs?.image || []), ...(f.refs?.video || []), ...(f.refs?.audio || [])];
@@ -78,7 +80,7 @@ function fill(item: HistoryItem) {
   // 画布的记号不跟着填回创作面板，不然下一次在创作页生成的也会被算成画布的。
   const { from: _from, ...rest } = item.form || {};
   const form = item.form && rest;
-  if (item.provider === 'autodl') {
+  if (isFlowItem(item)) {
     // 工作流：选回同一条工作流，按记录里存的规则和参数把表单恢复出来。规则要现取，所以不等它。
     setFlow(item);
   } else if (item.kind !== 'video') {
@@ -389,7 +391,7 @@ const present = ([, value]: Entry) => value != null && value !== '' && value !==
 function paramsOf(item: HistoryItem): Entry[] {
   const p = item.payload || {};
   // 工作流的参数是按规则填的，名字也按规则写成人话；素材在「参考素材」里看。
-  if (item.provider === 'autodl') {
+  if (isFlowItem(item)) {
     const rules = item.workflow?.rules || {};
     const fields = Object.entries(p)
       .filter(([key]) => !/^(image|video|audio)$/.test(rules[key]?.type || ''))

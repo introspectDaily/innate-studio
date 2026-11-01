@@ -242,11 +242,16 @@ export interface AppInfo extends KeyInfo {
   speech: KeyInfo;
   // AutoDL.art 的令牌（原样放进 Authorization，不加 Bearer）。
   autodl: KeyInfo;
+  // RunningHub：它是一组 Key、按并发路由，所以只说配了几个、总共能并行几个、现在在跑几个、涉及哪几个站点。
+  // 完整列表（每个 Key 的标题、头尾、站点、占用）只有管理员能从 /api/runninghub/keys 拿到。
+  runninghub: { hasKey: boolean; count?: number; concurrency?: number; running?: number; sites?: string[] };
   // 查余额用的火山引擎 Access Key 的状态，keyHint 是 Access Key ID 的头尾。
   billing: KeyInfo;
 }
 
-// AutoDL.art 工作流目录里的一项。平台列表接口不带参数规则，规则由服务端补详情时一并带上（提交前服务端还会现取一次）。
+// 工作流目录里的一项。AutoDL.art 的是平台上全部的工作流（列表接口不带参数规则，规则由服务端补详情时一并带上）；
+// RunningHub 的是 shared/runninghub.ts 里登记过的那几个（规则是登记表编译出来的，一定带着）。
+// 两边都编译成这一种形状，页面（模型菜单、表单、「参数」面板）就只用认它。
 export interface FlowSummary {
   uuid: string;
   name: string;
@@ -261,4 +266,8 @@ export interface FlowSummary {
   fromCredits?: number | null;
   usage?: number;
   rules?: Record<string, import('../../shared/autodl.ts').InputRule>;
+  // 'runninghub' 时提交走 /api/runninghub/submit，其余走 /api/autodl/submit。
+  provider?: string;
+  // RunningHub 的机器档位（instanceType）。其余工作流没有这一项。
+  machines?: { value: string; label: string; note: string }[];
 }

@@ -5,7 +5,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { BaseEdge, Handle, NodeToolbar, Position, getBezierPath, useConnection, useEdges, useInternalNode, useReactFlow, useStore as useFlowStore, useUpdateNodeInternals, type ConnectionLineComponentProps, type EdgeProps, type Node, type NodeProps } from '@xyflow/react';
-import { state, useStore, loadVoices, isPendingTask, polishModel, modelOption, flowModelsOf, flowModelLabel, flowSummary, flowReady, canvasPlace, KINDS as MEDIA } from '../store.ts';
+import { state, useStore, loadVoices, isPendingTask, polishModel, modelOption, flowModelsOf, flowModelLabel, flowHint, flowSummary, flowReady, canvasPlace, KINDS as MEDIA } from '../store.ts';
 import { RATIOS, fitImageQuality, fitImageSize, hasLastFrame, imageQualities, imageRatios, imageRefLimit, imageSizes, specOf, voiceName } from '../composer/state.ts';
 import { refLimitsOf } from '../../../shared/models.ts';
 import { IMAGE_QUALITY_LABELS, modelLabel, modelNote } from '../../../shared/models.ts';
@@ -884,32 +884,53 @@ export function TextNode({ id, data: raw, selected, dragging }: NodeProps) {
 
 // ---------- 图片 ----------
 
-// 节点选的是 AutoDL.art 的工作流时，它自己的枚举、开关参数（模式、风格预设…）放进「参数」。键就是规则里的参数名，值存在节点的 flowValues 里。
+// 节点选的是工作流（AutoDL.art 或 RunningHub）时，它自己的参数放进「参数」：键就是规则里的参数名，值存在节点的 flowValues 里。
+// 枚举、开关做成一行按钮；数字、文字做成输入框（和视频的随机种子一样）。
 // skip 是节点上已经有控件的参数（视频的分辨率、时长）。
-function flowParamGroups(model: string, values: Record<string, unknown> | undefined, onChange: (next: Record<string, unknown>) => void, skip: string[] = []): ParamGroup[] {
+function flowParams(model: string, values: Record<string, unknown> | undefined, onChange: (next: Record<string, unknown>) => void, skip: string[] = []): { groups: ParamGroup[]; texts: ParamText[] } {
   const rules = flowSummary(model)?.rules || {};
-  return Object.entries(rules)
-    .filter(([key, rule]) => !skip.includes(key) && (rule.type === 'enum' || rule.type === 'boolean'))
-    .map(([key, rule]) => {
-      const chosen = values?.[key];
-      if (rule.type === 'boolean') {
-        return {
-          label: ruleLabel(rule, key),
-          value: String(chosen === undefined ? Boolean(ruleDefault(rule)) : Boolean(chosen)),
-          options: [
-            { value: 'true', label: '开' },
-            { value: 'false', label: '关' },
-          ],
-          onChange: (next: string) => onChange({ ...values, [key]: next === 'true' }),
-        };
-      }
-      return {
+  const groups: ParamGroup[] = [];
+  const texts: ParamText[] = [];
+  for (const [key, rule] of Object.entries(rules)) {
+    if (skip.includes(key)) continue;
+    const chosen = values?.[key];
+    if (rule.type === 'enum') {
+      groups.push({
         label: ruleLabel(rule, key),
         value: String(chosen ?? ruleDefault(rule) ?? rule.options?.[0]?.label ?? ''),
         options: (rule.options || []).map((option) => ({ value: option.label, label: option.label })),
         onChange: (next: string) => onChange({ ...values, [key]: next }),
-      };
-    });
+      });
+      continue;
+    }
+    if (rule.type === 'boolean') {
+      groups.push({
+        label: ruleLabel(rule, key),
+        value: String(chosen === undefined ? Boolean(ruleDefault(rule)) : Boolean(chosen)),
+        options: [
+          { value: 'true', label: '开' },
+          { value: 'false', label: '关' },
+        ],
+        onChange: (next: string) => onChange({ ...values, [key]: next === 'true' }),
+      });
+      continue;
+    }
+    if (rule.type === 'integer' || rule.type === 'number') {
+      texts.push({
+        label: ruleLabel(rule, key),
+        value: String(chosen ?? ruleDefault(rule) ?? ''),
+        placeholder: rule.min !== undefined || rule.max !== undefined ? `${rule.min ?? ''}–${rule.max ?? ''}` : '默认',
+        // 整数只收数字；小数（步长、清晰度这种）要能打小数点。
+        numeric: rule.type === 'integer',
+        onChange: (next: string) => onChange({ ...values, [key]: next === '' ? undefined : Number(next) }),
+      });
+      continue;
+    }
+    if (rule.type === 'string') {
+      texts.push({ label: ruleLabel(rule, key), value: String(chosen ?? ruleDefault(rule) ?? ''), placeholder: '默认', onChange: (next: string) => onChange({ ...values, [key]: next === '' ? undefined : next }) });
+    }
+  }
+  return { groups, texts };
 }
 
 export function ImageNode({ id, data: raw, selected, dragging }: NodeProps) {
@@ -928,7 +949,7 @@ export function ImageNode({ id, data: raw, selected, dragging }: NodeProps) {
   const ratios = imageRatios(data.model);
   // 这个模型收几张参考图。不收的模型不显示参考图那一排；已经连进来的仍然显示，方便看出问题在哪。工作流收几张，看它的图片规则。
   const refLimit = isFlow ? flowMediaKeys(flowSummary(data.model)?.rules || {}, 'image').length : imageRefLimit(data.model);
-  const flowGroups = flowParamGroups(data.model, data.flowValues, (next) => flow.updateNodeData(id, { flowValues: next }));
+  const flowParamsHere = flowParams(data.model, data.flowValues, (next) => flow.updateNodeData(id, { flowValues: next }));
   const { snap } = useContext(CanvasActions);
   const shape = useShape(id);
   const selfNode = flow.getNode(id);
@@ -974,7 +995,7 @@ export function ImageNode({ id, data: raw, selected, dragging }: NodeProps) {
           <Prompt id={id} value={data.prompt} placeholder={promptHint(linked, hasRefs ? '描述修改要求，例如：把背景改成雪夜' : '描述主体、环境、构图、光线与风格')} presets={{ refs: inputs.filter((i) => i.link.kind === 'image').length + (usesSelfRef ? 1 : 0), limit: refLimit, run: (prompt) => generate(flow, id, snap, { prompt }) }} />
           {data.error && !data.busy && <p className="cnode-error">{data.error}</p>}
           <Bar working={working} ready={Boolean(data.prompt.trim()) || linked || hasRefs} action="生成图片" onSend={() => generate(flow, id, snap)}>
-            <Dropdown variant="tool" chevron label="模型" value={data.model} options={models.map((m) => modelOption(m, modelName(m), flows.includes(m) ? 'AutoDL 工作流' : null))} onChange={(model) => flow.updateNodeData(id, { model, flowValues: undefined, ratio: imageRatios(model).includes(data.ratio) ? data.ratio : imageRatios(model)[0] || data.ratio, resolution: fitImageSize(model, data.resolution), quality: fitImageQuality(model, data.quality) })} />
+            <Dropdown variant="tool" chevron label="模型" value={data.model} options={models.map((m) => modelOption(m, modelName(m), flows.includes(m) ? flowHint(m) : null))} onChange={(model) => flow.updateNodeData(id, { model, flowValues: undefined, ratio: imageRatios(model).includes(data.ratio) ? data.ratio : imageRatios(model)[0] || data.ratio, resolution: fitImageSize(model, data.resolution), quality: fitImageQuality(model, data.quality) })} />
             <Params
               label="参数"
               groups={[
@@ -986,8 +1007,9 @@ export function ImageNode({ id, data: raw, selected, dragging }: NodeProps) {
                       ...(imageQualities(data.model).length ? [{ label: '画质', value: fitImageQuality(data.model, data.quality) || '', options: imageQualities(data.model).map((q) => ({ value: q, label: IMAGE_QUALITY_LABELS[q] || q })), onChange: (quality: string) => flow.updateNodeData(id, { quality }) }] : []),
                     ]),
                 { label: '张数', value: String(data.count || 1), options: IMAGE_COUNTS.map((n) => ({ value: String(n), label: `${n} 张` })), onChange: (count) => flow.updateNodeData(id, { count: Number(count) }) },
-                ...flowGroups,
+                ...flowParamsHere.groups,
               ]}
+              texts={flowParamsHere.texts}
             />
           </Bar>
         </>
@@ -1235,7 +1257,7 @@ export function VideoNode({ id, data: raw, selected, dragging }: NodeProps) {
   const models = [...new Set([...(state.models.includes(data.model) ? state.models : [data.model, ...state.models]), ...flows].filter(Boolean))];
   const isFlow = (id: string) => flows.includes(id);
   const modelName = (id: string) => (isFlow(id) ? flowModelLabel(id) : modelLabel(id));
-  const modelHint = (id: string) => (isFlow(id) ? 'AutoDL 工作流' : modelNote(id));
+  const modelHint = (id: string) => (isFlow(id) ? flowHint(id) : modelNote(id));
   const able = specOf(data.model);
   const ratioLabel = (value: string) => RATIOS.find((r) => r.value === value)?.label || value;
   const set = (patch: Partial<VideoData>) => flow.updateNodeData(id, patch);
@@ -1257,7 +1279,7 @@ export function VideoNode({ id, data: raw, selected, dragging }: NodeProps) {
     set(fitVideo({ ...data, mode }));
   };
   // 模型是工作流时，它自己的枚举、开关参数（模式、风格预设…）也放进「参数」：键就是规则里的参数名。分辨率、时长用节点上直接的那两个。
-  const flowGroups = flowParamGroups(data.model, data.flowValues, (next) => set({ flowValues: next }), ['resolution']);
+  const flowParamsHere = flowParams(data.model, data.flowValues, (next) => set({ flowValues: next }), ['resolution']);
   const { snap } = useContext(CanvasActions);
   const shape = useShape(id);
   const hasSelfRef = Boolean(data.selfFrame || data.selfRole);
@@ -1310,20 +1332,21 @@ export function VideoNode({ id, data: raw, selected, dragging }: NodeProps) {
                 { label: '比例', value: data.ratio, options: able.ratios.map((r) => ({ value: r, label: ratioLabel(r) })), onChange: (ratio) => set({ ratio }) },
                 { label: '分辨率', value: data.resolution, options: able.resolutions.map((r) => ({ value: r, label: r })), onChange: (resolution) => set({ resolution }) },
                 // 时长是一段连续取值：画滑杆，不把每秒一格列成几十个按钮；支持的模型（2.5）可以交给模型决定。
-                {
+                // 工作流的规则里没有时长（RunningHub 的流大多没有，按参考视频的长度走）时，这一项不出现。
+                ...(able.durations.length ? [{
                   label: '时长',
                   value: data.durationAuto ? 'auto' : String(data.duration),
                   display: data.durationAuto ? '自动' : `${data.duration} 秒`,
                   range: { min: able.durations[0] ?? 4, max: able.durations[able.durations.length - 1] ?? 15 },
-                  onAuto: able.autoDuration ? (durationAuto) => set({ durationAuto }) : undefined,
-                  onChange: (duration) => set({ duration: Number(duration), durationAuto: false }),
-                },
+                  onAuto: able.autoDuration ? (durationAuto: boolean) => set({ durationAuto }) : undefined,
+                  onChange: (duration: string) => set({ duration: Number(duration), durationAuto: false }),
+                }] : []),
                 { label: '段数', value: String(data.count || 1), options: VIDEO_COUNTS.map((n) => ({ value: String(n), label: `${n} 段` })), onChange: (count) => set({ count: Number(count) }) },
                 // 声音和种子只有支持的模型才有（和创作页的「更多」一致）：MiniMax 两样都没有。
                 ...(able.audio ? [{ label: '声音', value: String(data.generateAudio !== false), options: [{ value: 'true', label: '有声' }, { value: 'false', label: '无声' }], onChange: (value: string) => set({ generateAudio: value === 'true' }) }] : []),
-                ...flowGroups,
+                ...flowParamsHere.groups,
               ]}
-              texts={able.seed ? [{ label: '随机种子', value: data.seed || '', placeholder: '留空则每次随机', numeric: true, onChange: (seed) => set({ seed }) }] : []}
+              texts={[...(able.seed && !isFlow(data.model) ? [{ label: '随机种子', value: data.seed || '', placeholder: '留空则每次随机', numeric: true, onChange: (seed: string) => set({ seed }) }] : []), ...flowParamsHere.texts]}
             />
           </Bar>
         </>
@@ -1369,7 +1392,7 @@ export function AudioNode({ id, data: raw, selected, dragging }: NodeProps) {
     };
   }, [speech, state.app.hasKey]);
 
-  const tools = [{ value: 'speech', label: '语音' }, { value: 'sfx', label: '音效' }, ...flows.map((id) => modelOption(id, flowModelLabel(id), 'AutoDL 工作流'))];
+  const tools = [{ value: 'speech', label: '语音' }, { value: 'sfx', label: '音效' }, ...flows.map((id) => modelOption(id, flowModelLabel(id), flowHint(id)))];
   return (
     <Frame
       id={id}
@@ -1394,7 +1417,7 @@ export function AudioNode({ id, data: raw, selected, dragging }: NodeProps) {
               options={tools}
               onChange={(next) => (isFlowModel(next) ? flow.updateNodeData(id, { model: next, flowValues: undefined }) : flow.updateNodeData(id, { tool: next as AudioData['tool'], model: undefined, flowValues: undefined }))}
             />
-            {isFlow && <Params label="参数" groups={flowParamGroups(data.model!, data.flowValues, (next) => flow.updateNodeData(id, { flowValues: next }))} />}
+            {isFlow && <Params label="参数" groups={flowParams(data.model!, data.flowValues, (next) => flow.updateNodeData(id, { flowValues: next })).groups} texts={flowParams(data.model!, data.flowValues, (next) => flow.updateNodeData(id, { flowValues: next })).texts} />}
             {speech && voices.length > 0 && (
               <Dropdown
                 variant="tool"

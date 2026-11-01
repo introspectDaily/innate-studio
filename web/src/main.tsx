@@ -20,7 +20,7 @@ let hadFlow: boolean | null = null;
 on('app', () => {
   if (hadKey === false && state.app.hasKey) loadModels().catch(() => {});
   hadKey = state.app.hasKey;
-  const flow = Boolean(state.app.autodl?.hasKey);
+  const flow = Boolean(state.app.autodl?.hasKey || state.app.runninghub?.hasKey);
   if (hadFlow === false && flow) loadFlows(true).catch(() => {});
   hadFlow = flow;
 });

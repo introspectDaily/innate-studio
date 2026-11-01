@@ -6,6 +6,7 @@ import { api, state, startHistoryLoop, loadHistory, polishModel, canManage, uses
 import { fmtCredits, fmtYuan } from '../format.ts';
 import { quoteCost, toCredits, refLimitsOf } from '../../../shared/models.ts';
 import { durationOf, flowInputs, isFlowModel, workflowCost, type FlowMedia } from '../../../shared/autodl.ts';
+import { rhCost, rhKeyOfUuid } from '../../../shared/runninghub.ts';
 import { defaults, fitImageQuality, fitImageSize, hasLastFrame, imageRefLimit, specOf } from '../composer/state.ts';
 import { buildVideoRequest, buildImageRequest, buildSpeechRequest, buildSfxRequest } from '../request.ts';
 import { recordName } from '../media.ts';
@@ -69,7 +70,9 @@ function videoRequest(node: Node, sources: { link: LinkData; node: Node }[], pro
 async function submitFlow(node: Node, sources: { link: LinkData; node: Node }[], prompt: string, say: (text: string) => void) {
   const { flow, inputs, form } = flowRequest(sources, node, prompt);
   say('正在提交');
-  return (await api<HistoryItem>('POST', '/api/autodl/submit', { workflow: flow.uuid, inputs, form: { ...form, ...FROM_CANVAS } })).id;
+  // 两家工作流的入参形状一样，只是提交的接口不同（RunningHub 那边要多走一步素材上传）。
+  const endpoint = flow.provider === 'runninghub' ? '/api/runninghub/submit' : '/api/autodl/submit';
+  return (await api<HistoryItem>('POST', endpoint, { workflow: flow.uuid, inputs, form: { ...form, ...FROM_CANVAS } })).id;
 }
 
 async function submitVideo(node: Node, sources: { link: LinkData; node: Node }[], prompt: string, say: (text: string) => void) {
@@ -320,8 +323,10 @@ export function quoteNode(flow: Flow, id: string): number | null {
     if (isFlowModel(String((node.data as AnyData).model || ''))) {
       // 工作流的价按提交的这组参数算（分辨率档、按秒计费的时长），和创作页用同一套规则。
       const { flow, inputs } = flowRequest(sources, node, prompt, true);
-      const yuan = workflowCost({ price_type: flow.billing?.price_type, billing_config: flow.billing?.billing_config, price: flow.billing?.price }, inputs, durationOf(inputs));
-      return yuan == null ? null : yuan * Math.max(1, Number((node.data as AnyData).count) || 1);
+      const count = Math.max(1, Number((node.data as AnyData).count) || 1);
+      // RunningHub 按任务定价：选哪档机器就是哪个价，价目在登记表里。
+      const yuan = flow.provider === 'runninghub' ? rhCost(rhKeyOfUuid(flow.uuid), inputs) : workflowCost({ price_type: flow.billing?.price_type, billing_config: flow.billing?.billing_config, price: flow.billing?.price }, inputs, durationOf(inputs));
+      return yuan == null ? null : yuan * count;
     }
     if (node.type === 'video') {
       const payload = videoRequest(node, sources, prompt, true).payload || {};

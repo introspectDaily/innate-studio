@@ -69,7 +69,7 @@ export const state = {
   recordsType: 'all' as CreateType | 'all',
   // 记录页看的是创作页生成的，还是画布里生成的。
   recordsSource: 'create' as 'create' | 'canvas',
-  app: { hosted: false, user: null, hasKey: false, keyHint: '', keySource: '', baseUrl: '', minimax: { hasKey: false, keyHint: '', keySource: '', baseUrl: '' }, aihubmix: { hasKey: false, keyHint: '', keySource: '', baseUrl: '' }, aihubmixManage: { hasKey: false, keyHint: '', keySource: '', baseUrl: '' }, speech: { hasKey: false, keyHint: '', keySource: '', baseUrl: '' }, autodl: { hasKey: false, keyHint: '', keySource: '', baseUrl: '' }, billing: { hasKey: false, keyHint: '', keySource: '', baseUrl: '' } } as AppInfo,
+  app: { hosted: false, user: null, hasKey: false, keyHint: '', keySource: '', baseUrl: '', minimax: { hasKey: false, keyHint: '', keySource: '', baseUrl: '' }, aihubmix: { hasKey: false, keyHint: '', keySource: '', baseUrl: '' }, aihubmixManage: { hasKey: false, keyHint: '', keySource: '', baseUrl: '' }, speech: { hasKey: false, keyHint: '', keySource: '', baseUrl: '' }, autodl: { hasKey: false, keyHint: '', keySource: '', baseUrl: '' }, runninghub: { hasKey: false }, billing: { hasKey: false, keyHint: '', keySource: '', baseUrl: '' } } as AppInfo,
   models: [] as string[],
   // 每个视频模型各自支持什么（分辨率、比例、时长、首尾帧），由本地服务随模型列表一起给。
   videoSpecs: {} as Record<string, VideoSpec>,
@@ -163,15 +163,21 @@ export function modelOption(id: string, label: string, note?: string | null) {
 // 多人模式下的成员：看到的是积分，看不到元和各平台的余额。
 export const usesCredits = () => state.app.hosted && !isAdmin();
 
-// ---------- AutoDL.art 的工作流：当成一种模型 ----------
-// 工作流和型号并列出现在模型菜单里，id 是 flow:<uuid>。目录里带着它的规则和计费，不用再取一次。
+// ---------- 工作流：当成一种模型 ----------
+// 两个来源编译成同一种形状，和型号并列出现在模型菜单里，id 是 flow:<uuid>：
+// - AutoDL.art：平台上全部的工作流，uuid 是平台给的；
+// - RunningHub：我们在 shared/runninghub.ts 里登记过的那几个，uuid 是 rh:<key>。
+// 目录里都带着规则和计费，不用再取一次。提交时按 provider 分到各自的接口。
 export const flowSummary = (model?: string | null) => (isFlowModel(model) ? state.flows.items.find((item) => item.uuid === flowUuidOf(String(model))) || null : null);
 export const flowModelLabel = (model: string) => flowSummary(model)?.name || flowUuidOf(model);
 // 这个类型的节点能用哪些工作流：看出什么文件（video、audio、image）和有没有拿到规则。
 export const flowModelsOf = (kind: Kind) => state.flows.items.filter((item) => item.output === kind && item.rules && Object.keys(item.rules).length).map((item) => flowModelId(item.uuid));
-// AutoDL.art 的令牌配好了（管理员直接看 state，成员只能看目录接口给的 hasKey）。
-export const flowReady = () => Boolean(state.app.autodl?.hasKey || state.flows.hasKey);
-// 至少有一个平台能用（火山方舟或 AutoDL.art）：侧栏的提示和快捷键看这个。
+// 模型菜单里那行小字：这个工作流是哪一家的。
+export const flowHint = (model: string) => (flowSummary(model)?.provider === 'runninghub' ? 'RunningHub 工作流' : 'AutoDL 工作流');
+// 工作流平台配好了（AutoDL.art 的令牌、或者 RunningHub 的一组 Key 里有能用的）。
+// 管理员直接看 state，成员只能看目录接口给的 hasKey。
+export const flowReady = () => Boolean(state.app.autodl?.hasKey || state.app.runninghub?.hasKey || state.flows.hasKey);
+// 至少有一个平台能用（火山方舟或任一家工作流平台）：侧栏的提示和快捷键看这个。
 export const hasAnyKey = () => Boolean(state.app.hasKey || flowReady());
 
 export async function loadApp() {
@@ -214,15 +220,23 @@ export async function loadVoices() {
   return state.voices;
 }
 
-// AutoDL.art 的工作流目录。服务端缓存一分钟，这里每次打开「工作流」时读一次，换了令牌也能马上看到。
+// 工作流目录。两份一起读：RunningHub 是我们登记过的那几个（排在前面），AutoDL.art 是平台上的全部。
+// 哪一份读不到都不影响另一份——只配了一家的账号照样能用。服务端对 AutoDL 的目录缓存一分钟。
 export async function loadFlows(force = false) {
   if (state.flows.loaded && !force) return state.flows.items;
-  try {
-    const data = await api<{ hasKey: boolean; total: number; items: FlowSummary[] }>('GET', '/api/autodl/workflows');
-    state.flows = { hasKey: data.hasKey, total: data.total, items: data.items || [], loaded: true, error: '' };
-  } catch (err) {
-    state.flows = { ...state.flows, loaded: true, error: (err as Error).message };
-  }
+  type Catalog = { hasKey: boolean; total: number; items: FlowSummary[] };
+  const failed: string[] = [];
+  const read = async (url: string): Promise<Catalog> => {
+    try {
+      return await api<Catalog>('GET', url);
+    } catch (err) {
+      failed.push((err as Error).message);
+      return { hasKey: false, total: 0, items: [] };
+    }
+  };
+  const [runninghub, autodl] = await Promise.all([read('/api/runninghub/workflows'), read('/api/autodl/workflows')]);
+  const items = [...runninghub.items, ...autodl.items];
+  state.flows = { hasKey: Boolean(runninghub.hasKey || autodl.hasKey), total: items.length, items, loaded: true, error: items.length ? '' : failed[0] || '' };
   emit('flows');
   return state.flows.items;
 }

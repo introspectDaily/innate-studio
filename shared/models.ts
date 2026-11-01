@@ -219,10 +219,12 @@ const DOUBAO_SPEECH_PRICE = 3;
 const DOUBAO_AUDIO_PRICE = 1;
 
 // 一条记录大约花了多少元。算不出来（以前别的平台留下的记录、没有用量、价目表里没有）就是 null。
-// opts.seconds 是平台给的实际时长；AutoDL 的工作流按任务定价（见 shared/autodl.ts），记在记录自己的 payload 快照里。
-export function estimateCost(item: { model?: string; kind?: string; tool?: string; usage?: Record<string, any> | null; payload?: Record<string, any> | null; provider?: string; workflow?: Record<string, any> | null }, opts: { seconds?: number } = {}): number | null {
+// opts.seconds 是平台给的实际时长；AutoDL 的工作流按任务定价（见 shared/autodl.ts），记在记录自己的 payload 快照里；
+// RunningHub 的工作流按任务扣费，平台会回真实的金额（usage.consumeMoney），没回才用登记表里的估价。
+export function estimateCost(item: { model?: string; kind?: string; tool?: string; usage?: Record<string, any> | null; payload?: Record<string, any> | null; provider?: string; workflow?: Record<string, any> | null; rh?: { estimate?: number } | null }, opts: { seconds?: number } = {}): number | null {
   const usage = item.usage;
   if (item.provider === 'autodl') return autodlCost(item, opts);
+  if (item.provider === 'runninghub') return runninghubCost(item);
   if (!usage) return null;
   if (item.tool === 'sfx' || item.tool === 'music') return item.model === AUDIO_MODEL && usage.audio_seconds > 0 ? (usage.audio_seconds / 60) * DOUBAO_AUDIO_PRICE : null;
   if (item.tool === 'speech') return item.model === SPEECH_MODEL && usage.text_words > 0 ? (usage.text_words / 10000) * DOUBAO_SPEECH_PRICE : null;
@@ -257,10 +259,20 @@ function autodlCost(item: { payload?: Record<string, any> | null; workflow?: Rec
   return autodlWorkflowCost({ price_type, billing_config, price }, item.payload || {}, opts.seconds || 0);
 }
 
+// RunningHub 的工作流：平台完成后回 usage.consumeMoney（元），那一刻起以它为准；
+// 没回（有的任务是 null）就用提交时登记表给的估价，和预扣的一致。
+function runninghubCost(item: { usage?: Record<string, any> | null; rh?: { estimate?: number } | null }): number | null {
+  const money = Number(item.usage?.consumeMoney);
+  if (Number.isFinite(money) && money > 0) return money;
+  const estimate = Number(item.rh?.estimate);
+  return Number.isFinite(estimate) && estimate > 0 ? estimate : null;
+}
+
 // 提交之前估这一条要花多少元，用来预扣积分；生成完再按 estimateCost 的实际用量结算。item 的形状和生成记录一样。估不出来是 null。
-// AutoDL 的记录带 provider: 'autodl'，走工作流快照自己的计费；其余平台走下面 baseQuoteCost 的价目表。
-export function quoteCost(item: { model?: string; kind?: string; tool?: string; prompt?: string; payload?: Record<string, any> | null; provider?: string; workflow?: Record<string, any> | null }, opts?: { seconds?: number }): number | null {
+// AutoDL 的记录带 provider: 'autodl'，走工作流快照自己的计费；RunningHub 用登记表给的那档机器的估价；其余平台走下面 baseQuoteCost 的价目表。
+export function quoteCost(item: { model?: string; kind?: string; tool?: string; prompt?: string; payload?: Record<string, any> | null; provider?: string; workflow?: Record<string, any> | null; rh?: { estimate?: number } | null }, opts?: { seconds?: number }): number | null {
   if (item.provider === 'autodl') return autodlCost(item, opts || {});
+  if (item.provider === 'runninghub') return runninghubCost(item);
   return baseQuoteCost(item);
 }
 

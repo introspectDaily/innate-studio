@@ -26,6 +26,7 @@ import './server/routes/library.js';
 import './server/routes/tos.js';
 import './server/routes/materials.js';
 import './server/routes/autodl.js';
+import './server/routes/runninghub.js';
 import './server/routes/users.js';
 
 // 启动时把每份数据都打开：没跑完的任务要接着查。

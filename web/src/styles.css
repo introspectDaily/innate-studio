@@ -1266,3 +1266,12 @@ input[type='search']::-webkit-search-cancel-button { -webkit-appearance: none; }
 .ve-frame-badge, .ve-frame-time { position: absolute; display: inline-flex; align-items: center; height: 18px; padding: 0 var(--sp-4); border-radius: var(--r-xs); background: var(--scrim); color: var(--on-scrim); font-size: var(--text-micro); }
 .ve-frame-badge { left: var(--sp-4); top: var(--sp-4); }
 .ve-frame-time { right: var(--sp-4); bottom: var(--sp-4); }
+
+/* 管理面板里的 RunningHub 密钥池：一行一个 Key，只露头尾；下面一行是汇总，再下面是接进来的工作流。 */
+.rh-pool { display: flex; flex-direction: column; gap: var(--sp-4); min-width: 0; }
+.rh-pool-row { display: flex; align-items: center; gap: var(--sp-8); min-width: 0; font-size: var(--text-caption); }
+.rh-pool-title { flex: 0 1 auto; max-width: 40%; color: var(--text); }
+.rh-pool-row .badge { flex: none; }
+.rh-pool-foot { display: flex; align-items: center; gap: var(--sp-8); flex-wrap: wrap; padding-top: var(--sp-4); border-top: 1px solid var(--border); font-size: var(--text-caption); }
+.rh-pool-foot .muted:first-child { flex: 1; }
+.rh-pool-flows { display: flex; flex-direction: column; gap: var(--sp-4); padding-top: var(--sp-4); border-top: 1px solid var(--border); }

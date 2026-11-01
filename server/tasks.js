@@ -6,12 +6,13 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { ARK, AUTODL, MINIMAX, MEDIA_DIRS, POLL_INTERVAL_MS, MAX_PENDING_MS, DOWNLOAD_RETRY_MS, MAX_DOWNLOAD_ATTEMPTS } from './config.js';
+import { ARK, AUTODL, MINIMAX, RUNNINGHUB, MEDIA_DIRS, POLL_INTERVAL_MS, MAX_PENDING_MS, DOWNLOAD_RETRY_MS, MAX_DOWNLOAD_ATTEMPTS } from './config.js';
 import { HttpError } from './http.js';
 import { openSpaces } from './store.js';
 import { apiKey, autodlToken, minimaxKey } from './keys.js';
 import { callArk, callMinimax, ERROR_HINTS } from './ark.js';
 import { getResult } from './autodl.js';
+import { normalizeStatus as runninghubStatus, queryTask, releaseTask, rhHasKey, rhKeys } from './runninghub.js';
 import { makeThumb } from './thumbs.js';
 import { syncCredits } from './credits.js';
 
@@ -62,7 +63,41 @@ const PLATFORMS = {
       return { status: AUTODL_STATUS[status], ...(results.length ? { results } : {}) };
     },
   },
+  // RunningHub：一整套 Key，提交时路由到具体某一个，查询也得用同一个（任务是挂在 Key 的账号下的）。
+  // 任务结束（成功或失败）时还要把那个 Key 的并发位子还给别人。
+  runninghub: {
+    ...RUNNINGHUB,
+    key: () => (rhHasKey() ? 'runninghub' : ''),
+    query: async (id, item) => {
+      // 查询要回到提交时那个站点：两个站的任务 id 互不相通，请求打到对方会报「任务不存在」。
+      // 所以传给 queryTask 的是整条 Key 记录（带 site），不是 Key 字符串。
+      // 提交用的 Key 已经从配置文件里拿掉时，优先找同一站点的其他 Key（同一账号下多发的 Key 也能查到），
+      // 最后才退回第一个（老记录没有 rhSite 字段，只能这么兜）。
+      const keys = rhKeys();
+      const key = keys.find((entry) => entry.id === item.rhKeyId) || (item.rhSite ? keys.find((entry) => entry.site === item.rhSite) : null) || keys[0];
+      if (!key) throw new HttpError(404, 'no_api_key', 'RunningHub 的 Key 都配置没了');
+      const payload = await queryTask(key, id);
+      const status = runninghubStatus(payload?.status);
+      const results = (Array.isArray(payload?.results) ? payload.results : [])
+        .map((result) => {
+          const ext = String(result?.outputType || result?.fileType || '').toLowerCase().replace(/^\./, '');
+          const type = RH_FILE_KINDS[ext] || '';
+          return { url: result?.url || result?.fileUrl, ...(ext && { file_type: ext }), ...(type && { type }) };
+        })
+        .filter((result) => result.url && result.type);
+      if (status === 'failed') {
+        const raw = payload?.errorMessage || payload?.failedReason?.exception_message || '';
+        return { status: 'failed', results, error: raw || '任务执行失败' };
+      }
+      return { status: status || 'in_progress', ...(results.length ? { results } : {}), ...(payload?.usage ? { usage: payload.usage } : {}) };
+    },
+    // 任务到终态了：把占着的并发位子还回去。
+    settle: (item) => releaseTask(item.rhKeyId, item.id),
+  },
 };
+
+// RunningHub 给的输出类型（outputType）是扩展名，换成我们这边的三种。
+const RH_FILE_KINDS = { mp4: 'video', mov: 'video', webm: 'video', mkv: 'video', png: 'image', jpg: 'image', jpeg: 'image', webp: 'image', mp3: 'audio', wav: 'audio', flac: 'audio' };
 
 export const isPending = (item) => item.status === 'queued' || item.status === 'in_progress';
 export const isTimedOut = (item) => item.status === 'failed' && item.error?.code === 'poll_timeout';
@@ -110,7 +145,7 @@ export async function pollTask(space, item) {
   if (polling.has(item.id)) return;
   polling.add(item.id);
   try {
-    applyTaskState(item, await PLATFORMS[item.provider].query(item.id));
+    applyTaskState(item, await PLATFORMS[item.provider].query(item.id, item));
     item.pollError = null;
   } catch (err) {
     if (err.status === 404 || err.code === 'task_not_exist') {
@@ -127,6 +162,8 @@ export async function pollTask(space, item) {
       item.status = 'failed';
       item.error = { message: '查询超时，请稍后重新查询。', code: 'poll_timeout' };
     }
+    // 到终态了：平台占用的东西（RunningHub 的并发位子）该还回去了。
+    if (!isPending(item)) PLATFORMS[item.provider].settle?.(item);
     polling.delete(item.id);
     // AutoDL 的结果里有平台给的时长，按秒计费时拿它对账。
     syncCredits(space, item, { seconds: Number(item.results?.[0]?.duration) || 0 });

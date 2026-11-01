@@ -3,6 +3,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SPEECH_MODEL, AUDIO_MODEL } from '../shared/models.ts';
+import { rhSiteOf } from '../shared/runninghub.ts';
 
 export const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 export const PORT = Number(process.env.PORT) || 5178;
@@ -10,6 +11,8 @@ export const PORT = Number(process.env.PORT) || 5178;
 export const HOST = process.env.HOST || '127.0.0.1';
 
 const trimSlash = (url) => url.replace(/\/+$/, '');
+// RunningHub 的默认站点：Key 文件没写 site、或者用 RUNNINGHUB_API_KEY 临时给一个 Key 时用它。
+const RH_DEFAULT_SITE = rhSiteOf(process.env.RUNNINGHUB_SITE) || 'cn';
 // 火山方舟：视频（Seedance）、图片（Seedream）、文本（豆包）都走它。地址里已经带着版本号，所以接口路径前面没有 /v1。
 export const ARK = { label: '火山方舟', baseUrl: trimSlash(process.env.ARK_BASE_URL || 'https://ark.cn-beijing.volces.com/api/v3'), envKey: 'ARK_API_KEY', configKey: 'arkKey' };
 // MiniMax 开放平台（国内站）：视频模型 MiniMax H3 走它。地址里不带版本号，接口路径自己带 /v2。
@@ -34,6 +37,38 @@ export const AUTODL = {
   envKey: 'AUTODL_ART_API_KEY',
   envKeys: ['AUTODL_ART_API_KEY', 'AUTODL_TOKEN'],
   configKey: 'autodlToken',
+};
+
+// RunningHub：ComfyUI 云工作流。和 AutoDL.art 不一样，不接「平台上的全部工作流」，
+// 只接 shared/runninghub.ts 里登记过的（每个都要人工对着它的 API JSON 配槽位和参数）。
+// Key 可以有好几个、按并发路由，所以不放在 config.json 的单值里：从一份 JSON 读，环境变量给路径。
+// 单个 Key 也可以用 RUNNINGHUB_API_KEY 直接给（临时排查用）。
+//
+// 站点：RunningHub 国内站 runninghub.cn、海外站 runninghub.ai 是两个独立的站——账号、Key、工作流 id、
+// 素材库都不通用。所以 Key 文件里每个 Key 都要写 site（ai / cn，枚举），请求按它打到对应域名；
+// 没写 site 的按 RUNNINGHUB_SITE（默认 cn，照顾原来只配国内站的部署）。
+export const RUNNINGHUB_SITES = {
+  cn: { label: '国内站', host: 'https://www.runninghub.cn', short: 'runninghub.cn' },
+  ai: { label: '海外站', host: 'https://www.runninghub.ai', short: 'runninghub.ai' },
+};
+
+export const RUNNINGHUB = {
+  label: 'RunningHub',
+  // 两个站点的域名表。Key 的 site 是这里的键。
+  sites: RUNNINGHUB_SITES,
+  // Key 文件里没写 site 时算哪个站（枚举 cn / ai）。
+  site: RH_DEFAULT_SITE,
+  // 所有 Key 走同一个自定义域名时用（调试、自建代理）；平时留空，按 Key 的 site 走。
+  baseUrl: process.env.RUNNINGHUB_BASE_URL ? trimSlash(process.env.RUNNINGHUB_BASE_URL) : '',
+  envKey: 'RUNNINGHUB_API_KEY',
+  envKeys: 'RUNNINGHUB_KEYS',
+  envKeysFile: 'RUNNINGHUB_KEYS_FILE',
+  envSite: 'RUNNINGHUB_SITE',
+  configKey: 'runninghubKeys',
+  // 所有 Key 都在忙时，提交最多等这么久再报错（毫秒）。
+  waitMs: Number(process.env.RUNNINGHUB_QUEUE_WAIT_MS ?? 15000),
+  // 上传的素材地址在平台那边只留一天，缓存比这个短一点。
+  uploadTtlMs: 20 * 60 * 60 * 1000,
 };
 
 // 环境变量原来叫 SEEDANCE_*（项目改名前），旧名字还认。
