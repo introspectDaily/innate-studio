@@ -1,16 +1,19 @@
-// 视频剪辑器：在浏览器内把一段视频裁剪成多段（MVP）。
-// 处理走 web/src/editor/ffmpeg.ts（ffmpeg.wasm），产物通过现有 /api/uploads 落盘，并刷新材料库。
+// 视频剪辑器：在浏览器里把一段视频裁剪成多段，也能随手截下若干静帧。
+// 片段走 web/src/editor/ffmpeg.ts（ffmpeg.wasm），静帧走 web/src/editor/frames.ts（canvas，不用 wasm，很快）。
+// 产物都通过现有 /api/uploads 落盘：画布拿去做成新节点，素材库则刷新列表。
 // 数据模型已预留「拼接 / 转场 / 音画分离」，后续加 UI 即可，不用换引擎。
 
 import { useEffect, useRef, useState } from 'react';
 import { openModal, toast } from '../ui/layers.tsx';
+import { Icon } from '../ui/Icon.tsx';
 import { fmtClock } from '../format.ts';
 import { uploadLocalFile } from '../media.ts';
 import { trimSegments, errText, type Segment } from './ffmpeg.ts';
+import { shootFrame } from './frames.ts';
 import type { Made } from '../canvas/edit.tsx';
 
-// 剪出来的片段交给谁：
-//   onMade — 画布在用，拿这些片段在当前节点右边生成新的视频节点，产物能继续参与生成流程；
+// 剪出来的片段、截下来的静帧交给谁：
+//   onMade — 画布在用，产物在源节点右边变成新节点（片段是视频节点，静帧是图片节点），能继续参与生成流程；
 //   reload — 素材库、创作记录在用的。落盘之后刷新列表就行。
 export interface EditorOptions {
   onMade?: (made: Made[]) => void;
@@ -23,7 +26,19 @@ interface EditorProps extends EditorOptions {
   onClose: () => void;
 }
 
+// 一张待导出的静帧。只存时间点和预览图，真正导出时再去视频上抠画面——
+// PNG 一张可能好几 MB，先存在内存里不值当。
+interface Frame {
+  id: string;
+  time: number; // 秒
+  name: string;
+  thumb: string; // 小尺寸 jpeg dataURL
+}
+
 type DragTarget = 'start' | 'end' | 'play' | null;
+
+// 帧要精确到 0.1 秒才看得出区别，fmtClock 只到秒，这里补一位。
+const fmtStamp = (sec: number) => `${fmtClock(sec)}.${Math.min(9, Math.floor((sec % 1) * 10))}`;
 
 function openVideoEditor(url: string, name: string, opts: EditorOptions = {}) {
   const modal = openModal({
@@ -47,10 +62,12 @@ function VideoEditor({ url, name, onMade, reload, onClose }: EditorProps) {
   const [start, setStart] = useState(0);
   const [end, setEnd] = useState(0);
   const [segments, setSegments] = useState<Segment[]>([]);
+  const [frames, setFrames] = useState<Frame[]>([]);
   const [reencode, setReencode] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [capturing, setCapturing] = useState(false);
   const [engineLoading, setEngineLoading] = useState(false);
-  const [progress, setProgress] = useState<{ index: number; ratio: number }>({ index: 0, ratio: 0 });
+  const [progress, setProgress] = useState<{ label: string; ratio: number }>({ label: '', ratio: 0 });
 
   const baseName = name.replace(/\.[^.]+$/, '') || 'clip';
 
@@ -182,60 +199,112 @@ function VideoEditor({ url, name, onMade, reload, onClose }: EditorProps) {
 
   const removeSegment = (id: string) => setSegments((list) => list.filter((s) => s.id !== id));
 
+  // 截下播放头现在停的那一帧。截帧不碰 ffmpeg，是画布直接拷画面，所以很快，可以连着截好几张。
+  const captureCurrent = async () => {
+    const video = videoRef.current;
+    if (!video || !duration) return;
+    const at = Math.min(Math.max(0, playhead), Math.max(0, duration - 0.05));
+    if (frames.some((f) => Math.abs(f.time - at) < 0.05)) {
+      toast('这个位置已经截过了，把播放头挪一下再截', 'info');
+      return;
+    }
+    video.pause();
+    setCapturing(true);
+    try {
+      const shot = await shootFrame(video, at);
+      setFrames((list) => [...list, { id: `f${Date.now()}`, time: at, thumb: shot.thumb, name: `${baseName}_帧${list.length + 1}.png` }]);
+      setPlayhead(at);
+    } catch (err) {
+      toast(`截帧失败：${errText(err)}`, 'error', 6000);
+    } finally {
+      setCapturing(false);
+    }
+  };
+
+  const removeFrame = (id: string) => setFrames((list) => list.filter((f) => f.id !== id));
+
+  // 片段和静帧一起导出：先切片段（要等引擎），再逐帧抠画面。哪一份失败都不影响其他份。
   const exportAll = async () => {
-    if (!segments.length) {
-      toast('请先添加至少一个分段', 'error');
+    if (!segments.length && !frames.length) {
+      toast('请先添加分段或截取至少一帧', 'error');
       return;
     }
     setBusy(true);
+    let videos = 0;
+    let images = 0;
+    const made: Made[] = [];
     try {
-      setEngineLoading(true);
-      const file = await (await fetch(url)).blob();
-      setEngineLoading(false);
-      const results = await trimSegments(file, segments, {
-        reencode,
-        onProgress: (index, ratio) => setProgress({ index, ratio }),
-      });
-      const made: Made[] = [];
-      for (const { segment, blob } of results) {
-        const f = new File([blob], segment.name, { type: 'video/mp4' });
-        try {
-          const saved = await uploadLocalFile(f, 'video', () => {});
-          made.push({ url: saved.url, name: saved.name || segment.name });
-        } catch (err) {
-          toast(`「${segment.name}」上传失败：${(err as Error).message}`, 'error', 6000);
+      if (segments.length) {
+        setEngineLoading(true);
+        const file = await (await fetch(url)).blob();
+        setEngineLoading(false);
+        const results = await trimSegments(file, segments, {
+          reencode,
+          onProgress: (index, ratio) => setProgress({ label: `第 ${index + 1}/${segments.length} 段`, ratio }),
+        });
+        for (const { segment, blob } of results) {
+          try {
+            const saved = await uploadLocalFile(new File([blob], segment.name, { type: 'video/mp4' }), 'video', () => {});
+            made.push({ url: saved.url, name: saved.name || segment.name, kind: 'video' });
+            videos++;
+          } catch (err) {
+            toast(`「${segment.name}」上传失败：${(err as Error).message}`, 'error', 6000);
+          }
         }
       }
+
+      // 静帧用预览窗口那个 video 来抠：画面会跟着跳到每一帧的位置，用户看得见截的是哪一帧。
+      const video = videoRef.current;
+      if (video) video.pause();
+      for (const [index, frame] of frames.entries()) {
+        if (!video) break;
+        setProgress({ label: `第 ${index + 1}/${frames.length} 帧`, ratio: 0 });
+        try {
+          const shot = await shootFrame(video, frame.time);
+          setPlayhead(frame.time);
+          const fileName = /\.(png|jpe?g)$/i.test(frame.name) ? frame.name : `${frame.name}.png`;
+          const saved = await uploadLocalFile(new File([shot.blob], fileName, { type: 'image/png' }), 'image', () => {});
+          made.push({ url: saved.url, name: saved.name || fileName, kind: 'image' });
+          images++;
+        } catch (err) {
+          toast(`「${frame.name}」截帧失败：${errText(err)}`, 'error', 6000);
+        }
+      }
+
       if (!made.length) {
-        toast('剪辑失败：没有片段保存成功', 'error', 7000);
+        toast('导出失败：没有产物保存成功', 'error', 7000);
         return;
       }
+      const summary = [videos ? `${videos} 段视频` : '', images ? `${images} 帧` : ''].filter(Boolean).join('、');
       if (onMade) {
-        // 画布里剪的：片段变成新的视频节点摆在右边，做完就把窗口关掉，让看到的是画布上的结果。
+        // 画布里剪的：产物变成新节点摆在右边，做完就把窗口关掉，让看到的是画布上的结果。
         onMade(made);
-        toast(`剪辑完成，${made.length} 段已放到画布上`, 'success', 5000);
+        toast(`导出完成，${summary}已放到画布上`, 'success', 5000);
         onClose();
       } else {
-        toast(`剪辑完成，已保存 ${made.length}/${results.length} 段到素材库`, 'success', 6000);
+        toast(`导出完成，${summary}已保存到素材库`, 'success', 6000);
         reload?.();
       }
     } catch (err) {
-      toast(`剪辑失败：${errText(err)}`, 'error', 7000);
+      toast(`导出失败：${errText(err)}`, 'error', 7000);
     } finally {
       setBusy(false);
       setEngineLoading(false);
-      setProgress({ index: 0, ratio: 0 });
+      setProgress({ label: '', ratio: 0 });
     }
   };
 
   const startPct = duration ? (start / duration) * 100 : 0;
   const endPct = duration ? (end / duration) * 100 : 0;
   const headPct = duration ? (playhead / duration) * 100 : 0;
+  const counts = [segments.length ? `${segments.length} 段` : '', frames.length ? `${frames.length} 帧` : ''].filter(Boolean);
+  const exportLabel = busy ? '处理中…' : counts.length ? `导出 ${counts.join(' + ')}${onMade ? '到画布' : ''}` : '导出';
+  const total = segments.length + frames.length;
 
   return (
     <div className="ve">
       <video ref={videoRef} src={url} className="ve-preview" controls playsInline preload="metadata" />
-      <p className="muted small">拖动两端手柄选段（预览画面会跟着跳到边界帧）；分段之间不允许重叠，选区会自动避开已有分段。点分段行可预览该段开头。</p>
+      <p className="muted small">拖动两端手柄选段（预览画面会跟着跳到边界帧）；分段之间不允许重叠，选区会自动避开已有分段。把播放头停到想要的那一刻点「截取当前帧」，可以连着截好几帧，最后一并导出成图片。</p>
 
       <div
         ref={trackRef}
@@ -252,6 +321,9 @@ function VideoEditor({ url, name, onMade, reload, onClose }: EditorProps) {
             style={{ left: `${(s.start / (duration || 1)) * 100}%`, width: `${((s.end - s.start) / (duration || 1)) * 100}%` }}
           />
         ))}
+        {frames.map((f) => (
+          <div key={f.id} className="ve-frame-mark" style={{ left: `${(f.time / (duration || 1)) * 100}%` }} title={`静帧 ${fmtStamp(f.time)}`} />
+        ))}
         <div className="ve-selection" style={{ left: `${startPct}%`, width: `${endPct - startPct}%` }} />
         <div className="ve-handle ve-handle-start" style={{ left: `${startPct}%` }} onPointerDown={onPointerDown('start')} />
         <div className="ve-handle ve-handle-end" style={{ left: `${endPct}%` }} onPointerDown={onPointerDown('end')} />
@@ -259,7 +331,7 @@ function VideoEditor({ url, name, onMade, reload, onClose }: EditorProps) {
       </div>
 
       <div className="ve-readout">
-        <span>播放头 {fmtClock(playhead)}</span>
+        <span>播放头 {fmtStamp(playhead)}</span>
         <span>入点 {fmtClock(start)}</span>
         <span>出点 {fmtClock(end)}</span>
         <span>当前选区 {fmtClock(Math.max(0, end - start))}</span>
@@ -291,6 +363,9 @@ function VideoEditor({ url, name, onMade, reload, onClose }: EditorProps) {
           设为出点
         </button>
         <button className="btn btn-sm btn-primary" type="button" disabled={busy} onClick={addSegment}>添加分段</button>
+        <button className="btn btn-sm" type="button" disabled={busy || capturing || !duration} onClick={captureCurrent}>
+          {capturing ? '截取中…' : '截取当前帧'}
+        </button>
         <label className="ve-check">
           <input type="checkbox" checked={reencode} disabled={busy} onChange={(e) => setReencode(e.target.checked)} />
           逐帧精确（重编码，较慢）
@@ -317,14 +392,45 @@ function VideoEditor({ url, name, onMade, reload, onClose }: EditorProps) {
         )}
       </div>
 
+      {frames.length > 0 && (
+        <div className="ve-frames">
+          <div className="ve-frames-head">
+            <span className="muted small">静帧 {frames.length} 张 · 点缩略图定位，导出一并保存成 PNG</span>
+            <button className="btn btn-sm" type="button" disabled={busy} onClick={() => setFrames([])}>清空</button>
+          </div>
+          <div className="ve-frame-grid">
+            {frames.map((f, i) => (
+              <div className="ve-frame" key={f.id}>
+                <button className="ve-frame-thumb" type="button" title={`定位到 ${fmtStamp(f.time)}`} onClick={() => seekTo(f.time)}>
+                  <img src={f.thumb} alt="" />
+                  <span className="ve-frame-badge">{i + 1}</span>
+                  <span className="ve-frame-time">{fmtStamp(f.time)}</span>
+                </button>
+                <button className="ve-frame-del" type="button" title="删掉这张" disabled={busy} onClick={() => removeFrame(f.id)}>
+                  <Icon name="x" size={12} />
+                </button>
+                <input
+                  className="input input-sm"
+                  value={f.name}
+                  disabled={busy}
+                  onChange={(e) => setFrames((list) => list.map((x) => (x.id === f.id ? { ...x, name: e.target.value } : x)))}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="modal-actions">
         {busy && (
           <span className="muted small">
-            {engineLoading ? '正在加载剪辑引擎（首次约 30MB）…' : `导出中：第 ${progress.index + 1}/${segments.length} 段 ${Math.round(progress.ratio * 100)}%`}
+            {engineLoading
+              ? '正在加载剪辑引擎（首次约 30MB）…'
+              : `导出中：${progress.label}${progress.ratio ? ` ${Math.round(progress.ratio * 100)}%` : ''}（共 ${total} 份）`}
           </span>
         )}
-        <button className="btn btn-primary" type="button" disabled={busy || !segments.length} onClick={exportAll}>
-          {busy ? '处理中…' : onMade ? `导出 ${segments.length} 段到画布` : `导出 ${segments.length} 段`}
+        <button className="btn btn-primary" type="button" disabled={busy || !total} onClick={exportAll}>
+          {exportLabel}
         </button>
       </div>
     </div>

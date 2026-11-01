@@ -6,7 +6,8 @@ import type { HistoryItem, Kind, Ref, TosObject } from './types.ts';
 
 // ---------- 缩略图 ----------
 
-function drawThumb(source: CanvasImageSource, width: number, height: number) {
+// 把一块画面缩成 320px 以内的 jpeg dataURL。素材缩略图和剪辑器的帧预览共用。
+export function drawThumb(source: CanvasImageSource, width: number, height: number) {
   const scale = Math.min(1, 320 / Math.max(width, height));
   const canvas = document.createElement('canvas');
   canvas.width = Math.max(1, Math.round(width * scale));

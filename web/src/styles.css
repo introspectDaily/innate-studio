@@ -1230,15 +1230,16 @@ input[type='search']::-webkit-search-cancel-button { -webkit-appearance: none; }
 
 /* ---------- 视频剪辑器 ---------- */
 .ve { display: flex; flex-direction: column; gap: var(--sp-12); }
-.ve-preview { width: 100%; max-height: 46vh; background: #000; border-radius: var(--sp-8); }
+.ve-preview { width: 100%; max-height: 46vh; background: #000; border-radius: var(--r-sm); }
 .ve-timeline { position: relative; height: 52px; margin: var(--sp-4) 0; padding: 0; cursor: pointer; touch-action: none; user-select: none; }
-.ve-track { position: absolute; inset: 14px 0; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--sp-4); }
+.ve-track { position: absolute; inset: 14px 0; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-xs); }
 .ve-selection { position: absolute; top: 14px; bottom: 14px; background: color-mix(in srgb, var(--accent) 32%, transparent); border-left: 2px solid var(--accent); border-right: 2px solid var(--accent); }
 .ve-seg-mark { position: absolute; top: 18px; bottom: 18px; background: color-mix(in srgb, var(--ok) 35%, transparent); border: 1px solid color-mix(in srgb, var(--ok) 60%, transparent); border-radius: 3px; pointer-events: none; }
-.ve-handle { position: absolute; top: 8px; bottom: 8px; width: 10px; margin-left: -5px; background: var(--accent); border-radius: var(--sp-4); cursor: ew-resize; box-shadow: var(--shadow-tile); }
+/* 手柄、播放头、帧标记都按中心对齐到时间点，所以自己往回挪半个宽度 */
+.ve-handle { position: absolute; top: 8px; bottom: 8px; width: 10px; transform: translateX(-50%); background: var(--accent); border-radius: var(--r-xs); cursor: ew-resize; box-shadow: var(--shadow-tile); }
 .ve-handle-start { left: 0; }
 .ve-handle-end { left: 0; }
-.ve-playhead { position: absolute; top: 4px; bottom: 4px; width: 2px; margin-left: -1px; background: var(--on-scrim); pointer-events: none; }
+.ve-playhead { position: absolute; top: 4px; bottom: 4px; width: 2px; transform: translateX(-50%); background: var(--on-scrim); pointer-events: none; }
 .ve-readout { display: flex; flex-wrap: wrap; gap: var(--sp-16); color: var(--text-2); font-size: var(--text-caption); }
 .ve-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-8); }
 .ve-check { display: inline-flex; align-items: center; gap: var(--sp-4); color: var(--text-2); font-size: var(--text-caption); cursor: pointer; }
@@ -1247,3 +1248,21 @@ input[type='search']::-webkit-search-cancel-button { -webkit-appearance: none; }
 .ve-seg-idx { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 999px; background: var(--surface-3); color: var(--text-2); font-size: var(--text-micro); flex: none; }
 .ve-seg-name { flex: 1; min-width: 120px; }
 .ve-seg-row .muted { flex: none; }
+/* 加了静帧那一排之后内容会高过弹窗，导出按钮吸在底部，不用滚到底才能点 */
+.ve .modal-actions { position: sticky; bottom: 0; z-index: 1; margin-top: 0; padding: var(--sp-8) 0; background: var(--surface-1); }
+/* 静帧：轨道上一根竖线标位置，下面一排缩略图卡片 */
+.ve-frame-mark { position: absolute; top: var(--sp-4); bottom: var(--sp-4); width: 2px; transform: translateX(-50%); background: var(--warn); pointer-events: none; }
+.ve-frames { display: flex; flex-direction: column; gap: var(--sp-8); }
+.ve-frames-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-8); }
+.ve-frame-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: var(--sp-8); max-height: 28vh; overflow: auto; padding-right: var(--sp-4); }
+.ve-frame { position: relative; display: flex; flex-direction: column; gap: var(--sp-4); }
+.ve-frame-thumb { position: relative; display: block; width: 100%; aspect-ratio: 16 / 9; padding: 0; overflow: hidden; background: var(--surface-3); border: 1px solid var(--border); border-radius: var(--r-xs); cursor: pointer; }
+.ve-frame-thumb:hover { border-color: var(--border-hover); }
+.ve-frame-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.ve-frame-del { position: absolute; right: var(--sp-4); top: var(--sp-4); display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 999px; background: var(--scrim); color: var(--on-scrim); cursor: pointer; opacity: 0; transition: opacity var(--t-fast) var(--ease); }
+.ve-frame:hover .ve-frame-del, .ve-frame-del:focus-visible { opacity: 1; }
+/* 触摸屏没有 hover，删除按钮一直露着 */
+@media (hover: none) { .ve-frame-del { opacity: 1; } }
+.ve-frame-badge, .ve-frame-time { position: absolute; display: inline-flex; align-items: center; height: 18px; padding: 0 var(--sp-4); border-radius: var(--r-xs); background: var(--scrim); color: var(--on-scrim); font-size: var(--text-micro); }
+.ve-frame-badge { left: var(--sp-4); top: var(--sp-4); }
+.ve-frame-time { right: var(--sp-4); bottom: var(--sp-4); }

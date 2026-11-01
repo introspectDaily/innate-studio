@@ -3,11 +3,14 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { uploadLocalFile } from '../media.ts';
+import { loadVideo, shootFrame } from '../editor/frames.ts';
 import { Segmented } from '../ui/controls.tsx';
 
 export interface Made {
   url: string;
   name: string;
+  // 产物是图还是视频。剪辑器一次可能既有片段又有静帧，画布按这个分别建节点；不写就按调用方给的默认类。
+  kind?: 'image' | 'video';
 }
 
 const loadImage = (url: string) =>
@@ -46,23 +49,17 @@ export async function splitGrid(url: string, size: number, name: string) {
 }
 
 // 从视频里截一帧。at 是第几秒；'last' 是最后一帧。
-export async function grabFrame(url: string, at: number | 'last', name: string) {
-  const video = document.createElement('video');
-  video.muted = true;
-  video.preload = 'auto';
-  video.src = url;
-  await new Promise<void>((resolve, reject) => {
-    video.onloadedmetadata = () => resolve();
-    video.onerror = () => reject(new Error('视频加载失败'));
-  });
-  // 最后一帧往前让一点点，停在真正有画面的地方。
-  const time = at === 'last' ? Math.max(0, video.duration - 0.05) : Math.min(Math.max(0, at), Math.max(0, video.duration - 0.05));
-  await new Promise<void>((resolve, reject) => {
-    video.onseeked = () => resolve();
-    video.onerror = () => reject(new Error('视频加载失败'));
-    video.currentTime = time;
-  });
-  return save(video, 0, 0, video.videoWidth, video.videoHeight, name);
+// 取画面的活交给 editor/frames.ts（剪辑器也用同一套），这里只负责落盘。
+export async function grabFrame(url: string, at: number | 'last', name: string): Promise<Made> {
+  const video = await loadVideo(url);
+  try {
+    const shot = await shootFrame(video, at);
+    const ref = await uploadLocalFile(new File([shot.blob], `${name}.png`, { type: 'image/png' }), 'image');
+    return { url: ref.url, name, kind: 'image' };
+  } finally {
+    video.removeAttribute('src');
+    video.load();
+  }
 }
 
 // 扩图的底图：把画布放大到 ratio 这个宽高比，原图原大放在正中间，多出来的地方填成灰色，交给模型去补。
