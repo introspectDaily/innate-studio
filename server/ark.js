@@ -31,6 +31,8 @@ export const ERROR_HINTS = {
   image_too_large: '参考图过大',
   // MiniMax
   authorized_error: 'API Key 无效。请确认是 MiniMax 国内站（platform.minimax.cn）创建的 Key',
+  // RunningHub（平台侧工作流执行失败）
+  vram_oom: '显存不够（OOM）：把视频时长或成片分辨率降下来，或者换成加强 48G 机器再跑',
 };
 
 // 平台给的原因多半是英文，还带着状态码，直接摆在卡片上看不懂。

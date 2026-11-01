@@ -12,7 +12,7 @@ import { buildVideoRequest, buildImageRequest, buildSpeechRequest, buildSfxReque
 import { recordName } from '../media.ts';
 import { confirmDialog, toast } from '../ui/layers.tsx';
 import type { HistoryItem, Kind, Ref } from '../types.ts';
-import { BOX_HEIGHT, NODE_LABELS, TITLE_ROOM, joinPrompt, keepBefore, nodeWidth, numbered, placeResults, resolveMentions, runOrder, stripNodeData, videoFormFrom, type AudioData, type ImageData, type LinkData, type MediaInput, type NodeKind, type TextData, type VideoData } from './model.ts';
+import { BOX_HEIGHT, NODE_LABELS, TITLE_ROOM, joinPrompt, keepBefore, nodeWidth, numbered, placeResults, resolveMentions, runOrder, stripNodeData, videoFormFrom, type AudioData, type ImageData, type LinkData, type MediaInput, type MentionLabels, type NodeKind, type TextData, type VideoData } from './model.ts';
 
 type Flow = ReactFlowInstance<Node, Edge>;
 type AnyData = Partial<ImageData & VideoData & AudioData & TextData>;
@@ -165,10 +165,18 @@ async function submitAudio(node: Node, prompt: string) {
 export const nameOf = (node: Node) => `${NODE_LABELS[node.type as NodeKind]}${node.data.no ? ` ${node.data.no}` : ''}`;
 
 // 最后发给模型的提示词：先把 @ 引用换掉，再把没被 @ 到的上游文本节点整段拼在前面。
-function promptOf(sources: { link: LinkData; node: Node }[], own: string) {
-  const { prompt, inlined } = resolveMentions(own, sources.map((s) => ({ name: nameOf(s.node), kind: s.link.kind, text: (s.node.data as AnyData).text })));
+// labels：工作流登记了「@ 引用怎么写」就按它换（海螺 H3 要 <Picture 1>），没登记就用画布默认的「图1」。
+function promptOf(sources: { link: LinkData; node: Node }[], own: string, labels?: MentionLabels) {
+  const { prompt, inlined } = resolveMentions(own, sources.map((s) => ({ name: nameOf(s.node), kind: s.link.kind, text: (s.node.data as AnyData).text })), labels);
   const upstream = sources.filter((s) => s.link.kind === 'text' && !inlined.has(nameOf(s.node))).map((s) => (s.node.data as AnyData).text || '');
   return joinPrompt(upstream, prompt);
+}
+
+// 这个节点选的工作流要求 @ 引用写成什么样。非工作流（豆包那些）返回 undefined，走「图1」。
+function mentionLabelsOf(model?: string | null): MentionLabels | undefined {
+  const mentions = flowSummary(model)?.mentions;
+  if (!mentions || !Object.keys(mentions).length) return undefined;
+  return mentions;
 }
 
 // 节点里是不是已经有内容了：上传的、生成出来的（生成失败的、记录已经删掉的不算）。
@@ -253,7 +261,7 @@ export async function generate(flow: Flow, id: string, snap: () => void = () => 
       .filter((edge) => edge.target === id)
       .map((edge) => ({ link: edge.data as unknown as LinkData, node: flow.getNode(edge.source)! }))
       .filter((s) => s.node);
-    const prompt = promptOf(sources, once.prompt ?? ((node.data as AnyData).prompt || ''));
+    const prompt = promptOf(sources, once.prompt ?? ((node.data as AnyData).prompt || ''), mentionLabelsOf((node.data as AnyData).model));
     const kind = node.type as NodeKind;
     const count = Math.max(1, Number((node.data as AnyData).count) || 1);
     let ids: string[];
@@ -318,7 +326,7 @@ export function quoteNode(flow: Flow, id: string): number | null {
     .filter((edge) => edge.target === id)
     .map((edge) => ({ link: edge.data as unknown as LinkData, node: flow.getNode(edge.source)! }))
     .filter((s) => s.node);
-  const prompt = promptOf(sources, (node.data as AnyData).prompt || '');
+  const prompt = promptOf(sources, (node.data as AnyData).prompt || '', mentionLabelsOf((node.data as AnyData).model));
   try {
     if (isFlowModel(String((node.data as AnyData).model || ''))) {
       // 工作流的价按提交的这组参数算（分辨率档、按秒计费的时长），和创作页用同一套规则。

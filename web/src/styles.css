@@ -646,6 +646,10 @@ input[type='search']::-webkit-search-cancel-button { -webkit-appearance: none; }
 .pending-info { display: flex; flex-direction: column; gap: var(--sp-4); width: 100%; margin-top: auto; padding: 0 var(--sp-4) var(--sp-4); }
 .pending-prompt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; color: var(--text-2); font-size: var(--text-caption); line-height: var(--lh-body); overflow-wrap: anywhere; }
 .pending-meta { color: var(--text-3); font-size: var(--text-caption); font-variant-numeric: tabular-nums; }
+/* 生成中的实时预览：平台推来的中间帧（一次采样的画面）。拿不到就不渲染。 */
+.live-preview { position: relative; width: 100%; margin-top: var(--sp-8); overflow: hidden; border-radius: var(--r-sm); background: var(--surface-2); }
+.live-preview-media { display: block; width: 100%; max-height: 320px; object-fit: contain; background: var(--surface-2); }
+.live-preview-meta { position: absolute; left: var(--sp-8); bottom: var(--sp-8); padding: var(--sp-2) var(--sp-8); border-radius: var(--r-xs); background: color-mix(in srgb, var(--bg) 72%, transparent); color: var(--text-2); font-size: var(--text-micro); font-variant-numeric: tabular-nums; }
 /* 生成失败：一个淡红底的提示图标，下面是标题、原因（最多两行）和一句说明。只有图标是红的，文字用正常的字色，读起来不刺眼 */
 .card-state.is-failed { gap: var(--sp-4); }
 .state-mark { display: grid; place-items: center; width: var(--h-md); height: var(--h-md); margin-bottom: var(--sp-8); border-radius: 50%; background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }

@@ -167,15 +167,18 @@ export const joinPrompt = (upstream: string[], own: string) => [...upstream, own
 // 图片、视频、音频换成它在这次请求里排第几个（图1、视频2），因为模型只知道参考素材的先后顺序；
 // 文本节点直接换成它里面的字，这个文本节点就不再整段拼到提示词前面了（inlined 里记着是哪几个）。
 // 指的节点没连进来，就原样留着。
+// labels：有些模型不认「图1」，要写成 <Picture 1>（海螺 H3 那套工作流就是这样）。给了模板就按模板生成，
+// 模板里的 {n} 换成上面的序号。工作流登记表里写着用哪种（RhWorkflow.mentions）。
 export interface Mentionable {
   // 节点的名字，例如「图片 1」。
   name: string;
   kind: NodeKind;
   text?: string;
 }
+export type MentionLabels = Partial<Record<NodeKind, string>>;
 const MENTION = /@(文本|图片|视频|音频) ?(\d+)/g;
 const ORDER_NAMES: Record<NodeKind, string> = { text: '文本', image: '图', video: '视频', audio: '音频' };
-export function resolveMentions(prompt: string, inputs: Mentionable[]): { prompt: string; inlined: Set<string> } {
+export function resolveMentions(prompt: string, inputs: Mentionable[], labels?: MentionLabels): { prompt: string; inlined: Set<string> } {
   const inlined = new Set<string>();
   const seen: Partial<Record<NodeKind, number>> = {};
   const order = new Map<string, number>();
@@ -184,7 +187,11 @@ export function resolveMentions(prompt: string, inputs: Mentionable[]): { prompt
     const name = `${label} ${no}`;
     const input = inputs.find((item) => item.name === name);
     if (!input) return whole;
-    if (input.kind !== 'text') return `${ORDER_NAMES[input.kind]}${order.get(name)}`;
+    if (input.kind !== 'text') {
+      const n = order.get(name);
+      const template = labels?.[input.kind];
+      return template ? template.replace('{n}', String(n)) : `${ORDER_NAMES[input.kind]}${n}`;
+    }
     inlined.add(name);
     return (input.text || '').trim();
   });

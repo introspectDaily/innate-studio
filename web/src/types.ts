@@ -270,4 +270,6 @@ export interface FlowSummary {
   provider?: string;
   // RunningHub 的机器档位（instanceType）。其余工作流没有这一项。
   machines?: { value: string; label: string; note: string }[];
+  // 提示词里「@图片 1」在提交前换成什么写法（模板里的 {n} 是序号）。没有就用「图1」。
+  mentions?: Partial<Record<Kind, string>> | null;
 }

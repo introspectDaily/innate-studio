@@ -7,6 +7,7 @@ import { fmtTime, fmtDuration, fmtBytes, fmtCost, fmtCredits } from './format.ts
 import { stopPlaying } from './playback.ts';
 import { VideoPlayer, AudioPlayer } from './player.tsx';
 import { Thumb } from './assets.tsx';
+import { LivePreview } from './livepreview.tsx';
 import { Icon } from './ui/Icon.tsx';
 import { Segmented, SearchBox, tip, clipTip } from './ui/controls.tsx';
 import { toast, openModal, openMenu, confirmDialog, copyText } from './ui/layers.tsx';
@@ -299,6 +300,8 @@ function MediaBox({ item, large = false }: { item: HistoryItem; large?: boolean 
     <div className="card-state is-pending">
       <div className="state-chip cursor-text">{item.status === 'queued' ? '排队中' : video ? `生成中 ${progress}%` : '生成中'}</div>
       {item.pollError && <div className="small muted">状态查询失败：{item.pollError}</div>}
+      {/* RunningHub 的中间帧：平台那条 WS 通道推出来的，拿不到就什么都不显示。 */}
+      {item.provider === 'runninghub' && <LivePreview taskId={item.id} />}
       {!large && (
         <div className="pending-info">
           {item.prompt && (

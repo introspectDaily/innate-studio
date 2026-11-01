@@ -12,7 +12,7 @@
 // 加一个工作流的步骤见 docs/runninghub-workflows.md。
 
 import type { InputRule } from './autodl.ts';
-import { cleanInputs } from './autodl.ts';
+import { cleanInputs, ruleDefault } from './autodl.ts';
 
 // 这些工作流在页面上的 id 前缀：flow:rh:<key>。和 AutoDL 的 flow:<uuid> 并列出现在模型菜单里。
 export const RH_PROVIDER = 'runninghub';
@@ -63,7 +63,9 @@ export interface RhChoice {
 export interface RhParam {
   key: string;
   label: string;
-  nodeId: string;
+  // 这个参数改哪个节点。同一个字段常常在几个节点上各有一份（比如分块前馈，
+  // 一采和二采各挂了一个），那就一次改完：给数组。
+  nodeId: string | string[];
   field: string;
   type: 'enum' | 'int' | 'float' | 'bool' | 'text';
   choices?: RhChoice[];
@@ -73,6 +75,22 @@ export interface RhParam {
   // 界面上那句说明（为什么这么填）。
   hint?: string;
 }
+
+// 一组「一次调好多个参数」的档位，用来对付显存不够这种事：
+// 用户不用自己研究该降分辨率还是该加分块，选一个档就行。
+// 档里的值只覆盖「用户没自己动过」的参数——动过的以用户为准。
+export interface RhPreset {
+  key: string;
+  label: string;
+  note?: string;
+  // key 是参数键（RhParam.key），value 是这个档要用的值。
+  values: Record<string, string | number | boolean>;
+}
+
+// 画质档在界面上占的那一格（它本身也是一条规则，界面上是个下拉）。
+export const RH_PRESET_KEY = 'preset';
+// 没选档时显示这个。
+export const RH_PRESET_CUSTOM = '自定义';
 
 // RunningHub 有两个站点：国内站 runninghub.cn、海外站 runninghub.ai。两边的账号、Key、工作流 id、
 // 素材库都是各管各的，所以 Key 上必须写清它属于哪个站（Key 文件的 site 字段），工作流 id 也要按站配。
@@ -107,12 +125,23 @@ export interface RhWorkflow {
   audios?: RhSlot[];
   // 至少要传几张图（默认等于槽位数）。少于这个数不提交；多出来的槽位按 fill 补。
   minImages?: number;
+  // 参考图张数由这个节点的一个整数参数决定（工作流内部按张数切换分支时用）。
+  // 值 = 用户真正给了几张图；后面为了填满槽位补的重复图不算。
+  imageCount?: { nodeId: string; field: string };
   // 图片不够时怎么补空位：
   // last —— 用已经给的最后一张重复填（默认，至少保证不会把工作流里存的测试图带进来）
   // skip —— 不传，让工作流用它自己存的值（只在那个位置本来就是可选的时候才对）
   fill?: 'last' | 'skip';
   prompt?: { nodeId: string; field: string; label?: string; required?: boolean };
+  // 成片在哪个节点。平台可能一次返回好几个文件（成片 + 一次采样的片段），
+  // 主文件按这里的顺序排，下载和播放都以第一个为准。
+  outputNodes?: string[];
+  // 提示词里「@图片 1」这类引用在提交前换成什么写法。不写就是「图1」（画布默认，豆包那套模型认）。
+  // 海螺 H3 工作流要写成 <Picture 1> / <Video 1> / <Audio 1>，模板里的 {n} 是这次请求里的序号。
+  mentions?: { image?: string; video?: string; audio?: string };
   params?: RhParam[];
+  // 画质/显存档位：界面上多一个下拉，选了就把档里的值套上去。
+  presets?: RhPreset[];
   // 开放哪几档机器，写 RH_MACHINES 里的 value。不写就是只有标准档。
   machines?: string[];
   // 每档机器的估价（元），提交时按它预扣积分；完成后再按平台回的 consumeMoney 对账。
@@ -122,6 +151,109 @@ export interface RhWorkflow {
 
 // ---------- 工作流登记表 ----------
 // 顺序就是工作流选择里的顺序。
+
+// 两个海螺 H3 工作流的可调参数是一样的（v1.7 只是多了「参考图张数」由图片数量自动决定）。
+const HAILUO_PARAMS: RhParam[] = [
+      {
+        key: 'aspect_ratio',
+        label: '画幅',
+        nodeId: '209',
+        field: 'aspect_ratio',
+        type: 'enum',
+        default: '16:9 (Widescreen)',
+        // 选项是 KJNodes 的 ResolutionSelector 固定的那份下拉。第一次真跑时核对一遍：
+        // 平台报 803 或者参数不合法，就照工作流 JSON 里 aspect_ratio 的写法改这里。
+        choices: [
+          { label: '16:9 横屏', value: '16:9 (Widescreen)' },
+          { label: '9:16 竖屏', value: '9:16 (Portrait Widescreen)' },
+          { label: '1:1 方形', value: '1:1 (Square)' },
+          { label: '4:3 横向', value: '4:3 (Standard)' },
+          { label: '3:4 纵向', value: '3:4 (Portrait)' },
+          { label: '3:2 横向', value: '3:2 (Photo)' },
+          { label: '2:3 纵向', value: '2:3 (Portrait Photo)' },
+          { label: '21:9 宽银幕', value: '21:9 (Ultrawide)' },
+        ],
+      },
+      { key: 'megapixels', label: '一采分辨率（百万像素）', nodeId: '209', field: 'megapixels', type: 'float', min: 0.2, max: 1.5, default: 0.5, hint: '第一遍采样的分辨率：0.5 ≈ 960×544，0.3 ≈ 832×480。显存不够就往下降' },
+      { key: 'shorter_edge', label: '参考图短边', nodeId: '246', field: 'value', type: 'int', min: 512, max: 1536, default: 928, hint: '送进模型的参考图会缩到这个短边' },
+  { key: 'steps', label: '采样步数', nodeId: '212', field: 'steps', type: 'int', min: 4, max: 20, default: 6, hint: '这个流用了 4 步加速 LoRA，超过 8 步一般不会更好' },
+  // 种子放 205：它是最终那一遍采样（196）的噪声源。182 是预览那一遍的，改了看不到结果。
+  { key: 'seed', label: '随机种子', nodeId: '205', field: 'noise_seed', type: 'int', min: 0, max: 4294967295, default: 0, hint: '填同一个数可以复现同一条结果' },
+  // 时长和显存是绑死的：海螺 H3 是音视频一体模型，帧数一多 token 就爆炸。
+  // 实测：14.9 秒（362 帧）× 1344×768 在标准 24G 上直接 torch.OutOfMemoryError（死在二采的采样器上），
+  // 而作者自己跑的样例是 125 帧（约 5.2 秒）。所以这里把源视频截断的帧数做成参数，默认给一个跑得动的长度。
+  { key: 'max_frames', label: '源视频最长帧数', nodeId: '286', field: 'frame_load_cap', type: 'int', min: 0, max: 1200, default: 96, hint: '0 = 用整段视频（最容易 OOM）。24G 机器建议 ≤ 120（约 5 秒）；想跑长片要同时降成片分辨率或换 48G 机器' },
+  // 二采（节点 247）决定成片的输出尺寸：1 百万像素 ≈ 1344×768，是显存的大头。
+  { key: 'upscale_megapixels', label: '二采分辨率（百万像素）', nodeId: '247', field: 'value', type: 'float', min: 0.3, max: 2, default: 1, hint: '第二遍采样（成片）的分辨率：1 ≈ 1344×768，0.5 ≈ 960×544。显存不够就往下降' },
+  // 一采的结果（节点 271）默认只放在临时目录，平台不返回。打开它，一次采样的片段也会一起回到我们这边。
+  { key: 'save_first_pass', label: '同时保留一次采样片段', nodeId: '271', field: 'save_output', type: 'bool', default: true, hint: '打开后结果里会多一段一次采样的视频，可以先看它再决定要不要用成片' },
+  // ---- 省显存的那几个开关 ----
+  // 分块前馈（MiniMaxChunkFeedForward）：token 太多时把 FFN 按 token 轴切几块算，峰值显存跟着降。
+  // 一采（277）和二采（201）各挂了一个，所以两个都要改。
+  { key: 'ff_chunks', label: 'FFN 分块数', nodeId: ['201', '277'], field: 'chunks', type: 'int', min: 1, max: 16, default: 2, hint: '前馈按 token 分几块算。块数越多单次占用越低：2→4→8→16。1 = 不分块（最快、最占显存）' },
+  { key: 'ff_seq_threshold', label: '分块触发阈值（token）', nodeId: ['201', '277'], field: 'seq_threshold', type: 'int', min: 512, max: 16384, default: 4096, hint: 'token 数超过它才分块。调到 2048 让它早点分，峰值更低' },
+  // 低显存注意力（MiniMaxLowVRAMAttention）：把注意力头分几组算。只挂在二采那条链上（620→202→201→183→200）。
+  { key: 'attn_head_chunks', label: '注意力分组数', nodeId: '202', field: 'head_chunks', type: 'int', min: 1, max: 32, default: 4, hint: '注意力头分几组算。越大峰值显存越低：4→8→16。1 = 一次算完（最占显存）' },
+  // 二采的潜空间放大：分块算 = 省显存；用完就卸载 = 把显存还给后面的采样。
+  { key: 'upscaler_chunking', label: '放大分块', nodeId: '206', field: 'enable_chunking', type: 'bool', default: false, hint: '二采放大时逐块算，省显存、略慢' },
+  { key: 'upscaler_force_unload', label: '放大完立刻卸载', nodeId: '206', field: 'force_unload', type: 'bool', default: false, hint: '放大结束把模型从显存里踢掉，给后面的采样腾地方' },
+      // 帧率没有开放：207 的 frame_rate 和 286 的 force_rate、节点 340 里的 24 是联动的，
+      // 只改一个会音画不同步。要改就在 ComfyUI 里一起改。
+];
+
+// 画质档：给用户一个「按显存」的省心选择，不用自己研究该降分辨率还是该加分块。
+// 档里的值只覆盖用户没自己动过的参数。
+const HAILUO_PRESETS: RhPreset[] = [
+  {
+    key: 'safe-24g',
+    label: '省显存（24G 保底）',
+    note: '标准 24G 机器上最稳的一档：分辨率压低、时长截到 5 秒内、注意力分组加倍',
+    values: {
+      megapixels: 0.3,
+      upscale_megapixels: 0.5,
+      max_frames: 96,
+      ff_chunks: 4,
+      ff_seq_threshold: 2048,
+      attn_head_chunks: 8,
+      upscaler_chunking: true,
+      upscaler_force_unload: true,
+    },
+  },
+  {
+    key: 'standard-24g',
+    label: '标准（24G 能跑）',
+    note: '作者那套参数：960×544 起、放大到 1344×768、时长约 5 秒',
+    values: {
+      megapixels: 0.5,
+      upscale_megapixels: 1,
+      max_frames: 96,
+      ff_chunks: 2,
+      ff_seq_threshold: 4096,
+      attn_head_chunks: 4,
+      upscaler_chunking: false,
+      upscaler_force_unload: false,
+    },
+  },
+  {
+    key: 'quality-48g',
+    label: '画质优先（48G+）',
+    note: '成片放大到约 1600×896、时长放到 7 秒左右，需要加强档机器',
+    values: {
+      megapixels: 0.5,
+      upscale_megapixels: 1.5,
+      max_frames: 168,
+      ff_chunks: 4,
+      ff_seq_threshold: 2048,
+      attn_head_chunks: 8,
+      upscaler_chunking: false,
+      upscaler_force_unload: false,
+    },
+  },
+];
+
+// 海螺 H3 的提示词只认 <Picture N> / <Video N> / <Audio N> 这种写法（见 h3-ref2va 的定版格式），
+// 画布上用户点 @ 插入的是「@图片 1」，提交前按这个模板换成 H3 的说法。
+const HAILUO_MENTIONS = { image: '<Picture {n}>', video: '<Video {n}>', audio: '<Audio {n}>' };
 
 export const RH_WORKFLOWS: RhWorkflow[] = [
   {
@@ -146,37 +278,53 @@ export const RH_WORKFLOWS: RhWorkflow[] = [
     videos: [{ nodeId: '286', field: 'video', label: '原视频' }],
     // 提示词的正文在 248 PrimitiveStringMultiline.value，208 节点的 prompt 是从它连线过去的，不能直接改。
     prompt: { nodeId: '248', field: 'value', label: '替换要求' },
-    params: [
-      {
-        key: 'aspect_ratio',
-        label: '画幅',
-        nodeId: '209',
-        field: 'aspect_ratio',
-        type: 'enum',
-        default: '16:9 (Widescreen)',
-        // 选项是 KJNodes 的 ResolutionSelector 固定的那份下拉。第一次真跑时核对一遍：
-        // 平台报 803 或者参数不合法，就照工作流 JSON 里 aspect_ratio 的写法改这里。
-        choices: [
-          { label: '16:9 横屏', value: '16:9 (Widescreen)' },
-          { label: '9:16 竖屏', value: '9:16 (Portrait Widescreen)' },
-          { label: '1:1 方形', value: '1:1 (Square)' },
-          { label: '4:3 横向', value: '4:3 (Standard)' },
-          { label: '3:4 纵向', value: '3:4 (Portrait)' },
-          { label: '3:2 横向', value: '3:2 (Photo)' },
-          { label: '2:3 纵向', value: '2:3 (Portrait Photo)' },
-          { label: '21:9 宽银幕', value: '21:9 (Ultrawide)' },
-        ],
-      },
-      { key: 'megapixels', label: '清晰度（百万像素）', nodeId: '209', field: 'megapixels', type: 'float', min: 0.2, max: 1.5, default: 0.5, hint: '越大越清晰也越慢' },
-      { key: 'shorter_edge', label: '参考图短边', nodeId: '246', field: 'value', type: 'int', min: 512, max: 1536, default: 928, hint: '送进模型的参考图会缩到这个短边' },
-      { key: 'steps', label: '采样步数', nodeId: '212', field: 'steps', type: 'int', min: 4, max: 20, default: 6, hint: '这个流用了 4 步加速 LoRA，超过 8 步一般不会更好' },
-      // 种子放 205：它是最终那一遍采样（196）的噪声源。182 是预览那一遍的，改了看不到结果。
-      { key: 'seed', label: '随机种子', nodeId: '205', field: 'noise_seed', type: 'int', min: 0, max: 4294967295, default: 0, hint: '填同一个数可以复现同一条结果' },
-      // 帧率没有开放：207 的 frame_rate 和 286 的 force_rate、节点 340 里的 24 是联动的，
-      // 只改一个会音画不同步。要改就在 ComfyUI 里一起改。
-    ],
+    mentions: HAILUO_MENTIONS,
+    params: HAILUO_PARAMS,
+    presets: HAILUO_PRESETS,
     machines: ['default', 'plus', 'ultra'],
+    // 207 是成片，271 是一次采样的片段（打开「同时保留一次采样片段」后才会回来）。
+    outputNodes: ['207'],
     // 估价，按次。等真跑过几次，把这里换成平台回的实际 consumeMoney。
+    estimate: { default: 0.5, plus: 1, ultra: 2 },
+  },
+  {
+    // v1.7：同一套采样链，但参考图槽位在 ComfyUI 里做成了「按张数切分支」，
+    // 所以 1~9 张都能用，且未启用的那几张既不加载也不编码。
+    // 张数不用在这里暴露成参数：服务端按用户实际给了几张图去填 736。
+    key: 'hailuo-h3-swap-9',
+    name: '海螺 H3 人物替换 v1.7（参考图 1~9 张）',
+    summary: '同 v1.5，但给几张参考图就用几张（1~9），多出来的不会拖慢。',
+    kind: 'video',
+    // 这个 id 才是能在 API 上调的 v1.7。之前配的 2116816328607047681 每次提交都返回
+    // 810 WORKFLOW_NOT_SAVED_OR_NOT_RUNNING（那份从没在 RunningHub 界面里保存并运行过）。
+    // 用 /api/openapi/getJsonApiFormat 核对过：95 个节点，736 是 PrimitiveInt(value=3)，
+    // 750/751/757 是 a>=2/a>=3/a>=9，9 个 LoadImage 都在。
+    workflowId: { ai: '2116808527745449985' },
+    // 节点 215/218/221/614/615/618/730/731/732 是工作流里的 9 个 LoadImage，
+    // 对应提示词里的 <Picture 1> ~ <Picture 9>。顺序不能改。
+    images: [
+      { nodeId: '215', field: 'image', label: '角色卡 1（<Picture 1>）' },
+      { nodeId: '218', field: 'image', label: '角色卡 2（<Picture 2>）' },
+      { nodeId: '221', field: 'image', label: '角色卡 3（<Picture 3>）' },
+      { nodeId: '614', field: 'image', label: '角色卡 4（<Picture 4>）' },
+      { nodeId: '615', field: 'image', label: '角色卡 5（<Picture 5>）' },
+      { nodeId: '618', field: 'image', label: '角色卡 6（<Picture 6>）' },
+      { nodeId: '730', field: 'image', label: '角色卡 7（<Picture 7>）' },
+      { nodeId: '731', field: 'image', label: '角色卡 8（<Picture 8>）' },
+      { nodeId: '732', field: 'image', label: '角色卡 9（<Picture 9>）' },
+    ],
+    minImages: 1,
+    // 空出来的槽位用最后一张补：LoadImage 不至于读到工作流里存的旧图，
+    // 真正的张数由下面的 imageCount 决定，补出来的位置不参与计算。
+    fill: 'last',
+    imageCount: { nodeId: '736', field: 'value' },
+    videos: [{ nodeId: '286', field: 'video', label: '原视频' }],
+    prompt: { nodeId: '248', field: 'value', label: '替换要求' },
+    mentions: HAILUO_MENTIONS,
+    params: HAILUO_PARAMS,
+    presets: HAILUO_PRESETS,
+    machines: ['default', 'plus', 'ultra'],
+    outputNodes: ['207'],
     estimate: { default: 0.5, plus: 1, ultra: 2 },
   },
 ];
@@ -223,6 +371,17 @@ export function rhRules(workflow: RhWorkflow): Record<string, InputRule> {
     rules[RH_PROMPT_KEY] = { type: 'prompt', label: workflow.prompt.label || '提示词', required: workflow.prompt.required !== false };
   }
 
+  // 画质档放在参数最前面：它是「省心那一键」，先看到它再看到各个细项。
+  if (workflow.presets?.length) {
+    rules[RH_PRESET_KEY] = {
+      type: 'enum',
+      label: '画质档',
+      description: '按显存给的一组推荐值，一次调好几个参数；自己动过的参数以你改的为准',
+      options: [{ label: RH_PRESET_CUSTOM }, ...workflow.presets.map((preset) => ({ label: preset.label }))],
+      default: RH_PRESET_CUSTOM,
+    };
+  }
+
   for (const param of workflow.params || []) {
     if (param.type === 'enum') {
       rules[param.key] = { type: 'enum', label: param.label, description: param.hint, default: choiceLabel(param), options: (param.choices || []).map((choice) => ({ label: choice.label })) };
@@ -265,8 +424,10 @@ export interface RhPlan {
   nodeInfoList: { nodeId: string; fieldName: string; fieldValue: string | number | boolean }[];
   // 提交时作为 instanceType 的那一档。
   machine: string;
-  // 需要上传的素材：键是从 inputs 里取值的键，slot 说明是哪一个位置。
-  uploads: { key: string; kind: 'image' | 'video' | 'audio'; label: string }[];
+  // 需要上传的素材：key 是入参里的键，slot 说明是哪一个位置。
+  // value 是这个位置最终要传的值——补位补出来的位置（用户没给这一张）在 inputs 里是空的，
+  // 但平台那边这个 LoadImage 也得有一个真实文件，所以上传时按 value 读，不能回 inputs 里取。
+  uploads: { key: string; kind: 'image' | 'video' | 'audio'; label: string; value: string }[];
 }
 
 // 把页面给的入参按登记表检查一遍，再拼成 nodeInfoList。
@@ -292,11 +453,16 @@ export function rhPlan(workflow: RhWorkflow, raw: Record<string, unknown> = {}):
     const final = value || (workflow.fill === 'skip' ? '' : fallback);
     if (!final) return;
     push(images[index].nodeId, images[index].field, final);
-    uploads.push({ key: rhImageKey(index), kind: 'image', label: images[index].label });
+    uploads.push({ key: rhImageKey(index), kind: 'image', label: images[index].label, value: final });
   });
   // 一张都没给、或者少于下限：说清楚要几张。
   if (images.length && filled.length < minImages) {
     problems.push(minImages > 1 ? `请上传${images[filled.length]?.label || '图片'}（至少 ${minImages} 张）` : `请上传${images[0].label}`);
+  }
+  // 工作流自己用「张数」参数挑分支（v1.7 的 1~9 张可选流）：按用户实际给了几张填，
+  // 不按槽位数——上面为了填满 LoadImage 补出来的重复图不参与计数。
+  if (workflow.imageCount && filled.length) {
+    push(workflow.imageCount.nodeId, workflow.imageCount.field, filled.length);
   }
 
   for (const [kind, slots, keyOf] of [
@@ -311,7 +477,7 @@ export function rhPlan(workflow: RhWorkflow, raw: Record<string, unknown> = {}):
         return;
       }
       push(slot.nodeId, slot.field, value);
-      uploads.push({ key: keyOf(index), kind, label: slot.label });
+      uploads.push({ key: keyOf(index), kind, label: slot.label, value });
     });
   }
 
@@ -320,26 +486,58 @@ export function rhPlan(workflow: RhWorkflow, raw: Record<string, unknown> = {}):
     if (text) push(workflow.prompt.nodeId, workflow.prompt.field, text);
   }
 
+  // 页面没带某个参数时，用登记表里的默认值补上。
+  // 必须补：画布那边只有「用户动过的」参数才会带过来，没带的就落回平台保存的那份工作流——
+  // 而平台那份的 286.frame_load_cap 是 0（整段视频），一漏传就会又走回 OOM 那条路。
+  // 创作页那边每个参数都带着默认值上来，这段对它没有影响。
+  for (const param of workflow.params || []) {
+    if (inputs[param.key] !== undefined && inputs[param.key] !== null && inputs[param.key] !== '') continue;
+    // 枚举的 default 存的是节点要的原值，登记表里对外是标签，这里统一成标签。
+    const fallback = param.type === 'enum'
+      ? (param.choices || []).find((choice) => choice.value === param.default)?.label
+      : param.default;
+    if (fallback === undefined || fallback === null || fallback === '') continue;
+    inputs[param.key] = fallback;
+  }
+
+  // 画质档：把档里的值套到「用户没自己动过」的参数上。
+  // 动过的判断标准是：提交上来的值和规则里的默认值不一样（页面不填就用默认值，
+  // 所以创作页那边每个参数都会带着默认值上来，画布那边只有动过的才带）。
+  const preset = (workflow.presets || []).find((item) => item.label === String(inputs[RH_PRESET_KEY] ?? '')) || null;
+  if (preset) {
+    for (const [key, value] of Object.entries(preset.values)) {
+      const rule = rules[key];
+      if (!rule) continue;
+      const given = inputs[key];
+      const fallback = ruleDefault(rule);
+      const touched = given !== undefined && fallback !== undefined && given !== fallback;
+      if (touched) continue;
+      inputs[key] = value;
+    }
+  }
+
   for (const param of workflow.params || []) {
     const value = inputs[param.key];
     if (value === undefined || value === null || value === '') continue;
+    const targets = Array.isArray(param.nodeId) ? param.nodeId : [param.nodeId];
+    // 枚举：界面给的是标签，节点要的是原值。
     if (param.type === 'enum') {
-      // 界面给的是标签，节点要的是原值。
       const choice = (param.choices || []).find((item) => item.label === String(value));
-      if (choice) push(param.nodeId, param.field, choice.value);
+      if (choice) for (const nodeId of targets) push(nodeId, param.field, choice.value);
       continue;
     }
     if (param.type === 'bool') {
-      push(param.nodeId, param.field, Boolean(value));
+      for (const nodeId of targets) push(nodeId, param.field, Boolean(value));
       continue;
     }
     if (param.type === 'text') {
-      push(param.nodeId, param.field, String(value));
+      for (const nodeId of targets) push(nodeId, param.field, String(value));
       continue;
     }
     const number = Number(value);
     if (!Number.isFinite(number)) continue;
-    push(param.nodeId, param.field, param.type === 'int' ? Math.round(number) : number);
+    const out = param.type === 'int' ? Math.round(number) : number;
+    for (const nodeId of targets) push(nodeId, param.field, out);
   }
 
   const machine = rhMachineOf(workflow, inputs);

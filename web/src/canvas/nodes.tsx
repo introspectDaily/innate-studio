@@ -274,9 +274,20 @@ function Prompt({ id, value, placeholder, presets }: { id: string; value: string
     const el = area.current!;
     if (!inputs.length) return typed ? undefined : toast('请先连接上游节点', 'info');
     const at = el.selectionStart ?? el.value.length;
+    // 这个节点选的工作流要 <Picture 1> 这种写法（海螺 H3）时，菜单里直接把换成什么写出来，
+    // 免得用户以为 @图片 1 就是最终发给模型的那几个字。
+    const labels = flowSummary(String((flow.getNode(id)?.data as AnyData | undefined)?.model || ''))?.mentions;
+    const counts: Record<string, number> = {};
+    const noteOf = (input: (typeof inputs)[number]) => {
+      const kind = input.link.kind;
+      const n = (counts[kind] = (counts[kind] || 0) + 1);
+      if (kind === 'text') return ((input.node.data as unknown as TextData).text || '').slice(0, 12);
+      const template = labels?.[kind as Kind];
+      return template ? template.replace('{n}', String(n)) : linkLabel(input.link);
+    };
     openMenu(el, {
       label: '引用上游节点',
-      items: inputs.map((input) => ({ value: nameOf(input.node), label: nameOf(input.node), note: input.link.kind === 'text' ? ((input.node.data as unknown as TextData).text || '').slice(0, 12) : linkLabel(input.link) })),
+      items: inputs.map((input) => ({ value: nameOf(input.node), label: nameOf(input.node), note: noteOf(input) })),
       onSelect: (name) => {
         const text = el.value;
         const from = typed && text[at - 1] === '@' ? at - 1 : at;
@@ -417,6 +428,9 @@ interface ParamText {
 // 点开之后的那一页：每组参数一行小方块（时长是滑杆），文字参数一行输入框。它画在画布外面的浮层里，所以自己记着选了什么。
 function ParamSheet({ groups, texts = [] }: { groups: ParamGroup[]; texts?: ParamText[] }) {
   const [picked, setPicked] = useState(() => groups.map((group) => group.value));
+  // 文字输入也要自己记一份：浮层内容是打开那一刻的快照，外面重画进不来，
+  // 受控输入的 value 会一直停在打开那一刻，每打一个字就被 React 按旧值还原（看起来就是「输入不动」）。
+  const [drafts, setDrafts] = useState(() => texts.map((field) => field.value));
   // 滑杆的刻度：每 5 秒一格，从 0 画到上限。
   const marks = (max: number) => Array.from({ length: Math.floor(max / 5) + 1 }, (_, i) => i * 5);
   return (
@@ -477,17 +491,21 @@ function ParamSheet({ groups, texts = [] }: { groups: ParamGroup[]; texts?: Para
           )}
         </div>
       ))}
-      {texts.map((field) => (
+      {texts.map((field, index) => (
         <div key={field.label} className="cnode-sheet-group">
           <div className="popover-title">{field.label}</div>
           <input
             className="cnode-text"
             type="text"
             inputMode={field.numeric ? 'numeric' : undefined}
-            value={field.value}
+            value={drafts[index] ?? field.value}
             placeholder={field.placeholder}
             aria-label={field.label}
-            onChange={(e) => field.onChange(field.numeric ? e.currentTarget.value.replace(/[^\d-]/g, '') : e.currentTarget.value)}
+            onChange={(e) => {
+              const next = field.numeric ? e.currentTarget.value.replace(/[^\d-]/g, '') : e.currentTarget.value;
+              setDrafts((now) => now.map((value, n) => (n === index ? next : value)));
+              field.onChange(next);
+            }}
           />
         </div>
       ))}

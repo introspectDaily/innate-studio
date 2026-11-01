@@ -18,7 +18,7 @@ import { apiKey } from './server/keys.js';
 import { MEDIA_PATH } from './server/media.js';
 import { startPolling } from './server/tasks.js';
 import { allUsers, apiKeyOf, isHosted, userOf } from './server/auth.js';
-import { spaceOf } from './server/spaces.js';
+import { openAllSpaces, spaceOf } from './server/spaces.js';
 import './server/routes/account.js';
 import './server/routes/generate.js';
 import './server/routes/text.js';
@@ -153,5 +153,7 @@ server.listen(PORT, HOST, () => {
   if (isHosted()) console.log(`多人模式：${allUsers().length} 个账号，需要登录。`);
   if (!fs.existsSync(path.join(PUBLIC_DIR, 'index.html'))) console.log('还没有构建页面，打开会是空的。先运行 pnpm build（pnpm start 会自动构建）。');
   if (!apiKey()) console.log(`还没有设置 ${ARK.label} 的 API Key，打开页面后在「管理」里填写。`);
+  // 先把所有空间打开（关掉再开也要接着跑），再开始轮询。
+  openAllSpaces();
   startPolling();
 });

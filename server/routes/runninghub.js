@@ -12,6 +12,7 @@ import { localMediaFile } from '../media.js';
 import { claim, drop, pick, resolveWorkflowId, resolveWorkflowIds, rhHasKey, rhKeyState, submitWorkflow, uploadMedia } from '../runninghub.js';
 import { RH_PROVIDER, RH_SITES, RH_WORKFLOWS, rhCost, rhMachines, rhMedia, rhPlan, rhRules, rhWorkflow, rhUuid } from '../../shared/runninghub.ts';
 import { applyTaskState, historyView, newItem } from '../tasks.js';
+import { previewState, startPreview, stopPreview } from '../rhpreview.js';
 import { holdCredits, syncCredits } from '../credits.js';
 import { toCredits } from '../../shared/models.ts';
 
@@ -31,6 +32,8 @@ function catalog() {
         output: workflow.kind,
         media: rhMedia(workflow),
         rules: rhRules(workflow),
+        // 提示词里 @ 引用的写法（<Picture 1> 这种）。画布提交前照着换。
+        mentions: workflow.mentions || null,
         machines: rhMachines(workflow).map((machine) => ({ value: machine.value, label: machine.label, note: machine.note })),
         provider: RH_PROVIDER,
         // 价格：按标准档的估价。页面上的「起 N 积分」用它，服务端预扣用同一份估价（rhCost）。
@@ -47,6 +50,11 @@ route('GET', /^\/api\/runninghub\/workflows$/, async () => {
   const items = catalog();
   return { hasKey: rhHasKey(), total: items.length, items };
 });
+
+// 实时预览：跑着的任务把最近一帧中间结果给前端（base64，现给现用，不落盘）。
+// 平台那条 WS 通道是「不推荐、不稳定」的，所以拿不到就是拿不到——
+// 这个接口返回 state:'none'，前端照常等轮询结果，不影响出片。
+route('GET', /^\/api\/runninghub\/preview\/([^/]+)$/, async ({ params }) => previewState(decodeURIComponent(params[0])) || { state: 'none' });
 
 // 管理面板：有哪些 Key、各自跑到多满、每个工作流配的是哪个 workflowId。只给管理员，Key 只露头尾。
 route('GET', /^\/api\/runninghub\/keys$/, async () => rhKeyState(), 'admin');
@@ -114,12 +122,20 @@ route('POST', /^\/api\/runninghub\/submit$/, async ({ req, space, user }) => {
     const workflowId = resolveWorkflowId(workflow, lease.site);
     // 素材上传：位置 → fileName。nodeInfoList 里对应的字段换成平台认的文件名。
     // 上传也打到这个 Key 的站点（两个站的素材库不通用）。
+    // 值一律用 upload.value：补位补出来的位置（用户只给了 2 张、剩下 7 个 LoadImage 也要有文件）
+    // 在 inputs 里是空的，回 inputs 取就会漏传，平台那边直接 Invalid image file。
+    // 同一个文件被多个位置复用时只上传一次。
     const names = new Map();
+    const sent = new Map();
     for (const upload of uploads) {
-      const value = inputs[upload.key];
+      const value = String(upload.value ?? inputs[upload.key] ?? '').trim();
       if (!value) continue;
-      const media = await readMedia(space, value);
-      const { fileName } = await uploadMedia(lease, media);
+      let fileName = sent.get(value);
+      if (!fileName) {
+        const media = await readMedia(space, value);
+        ({ fileName } = await uploadMedia(lease, media));
+        sent.set(value, fileName);
+      }
       names.set(upload.key, fileName);
     }
     const outbound = nodeInfoList.map((item) => {
@@ -137,6 +153,12 @@ route('POST', /^\/api\/runninghub\/submit$/, async ({ req, space, user }) => {
     throw err;
   }
 
+  // 提交响应里有 netWssUrl / clientId：ComfyUI 的实时预览通道（官方标注「不推荐、不稳定」，
+  // 当成锦上添花）。有地址就连上，把中间帧留在内存里给前端低频拉。
+  const wsUrl = String(submitted?.netWssUrl || '');
+  const wsClient = String(submitted?.clientId || '');
+  if (wsUrl) startPreview(taskId, wsUrl, wsClient);
+
   const item = newItem({
     id: taskId,
     provider: RH_PROVIDER,
@@ -150,6 +172,8 @@ route('POST', /^\/api\/runninghub\/submit$/, async ({ req, space, user }) => {
     rhKeyId: lease.id,
     rhSite: lease.site,
     rh: { key: workflow.key, machine, estimate, site: lease.site },
+    // 实时预览通道的地址：记在记录上，服务重启后还能重新连上（任务还在跑才有帧）。
+    ...(wsUrl ? { rhPreview: { url: wsUrl, clientId: wsClient } } : {}),
     status: 'queued',
     lastPolledAt: Date.now(),
     ...(draft.credits ? { credits: draft.credits } : {}),

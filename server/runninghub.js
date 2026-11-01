@@ -231,15 +231,13 @@ export function resolveWorkflowIds(workflow) {
 // 这样「提交到拿到 taskId」这段时间里别的请求不会挑中同一个 Key。
 const running = new Map();
 let cursor = 0;
-let hydrated = false;
 
 const slotsOf = (id) => running.get(id) || new Set();
 
 // 服务重启后内存里的计数没了，但平台上那些任务还在跑。用历史记录把占位情况还原回来，
 // 不然重启一次就会把同一个 Key 的超额任务又派上去。
+// 每次提交前都扫一遍：成员的空间可能是这之后才打开的（多用户模式下），那会儿也要把它算进来。
 function hydrate() {
-  if (hydrated) return;
-  hydrated = true;
   for (const space of openSpaces()) {
     for (const item of space.history) {
       if (item.provider !== 'runninghub' || !item.rhKeyId) continue;
@@ -356,7 +354,9 @@ function rhError(payload, fallbackStatus, fallbackCode) {
 
 // 一次请求。成功返回解析后的 JSON（V2 是扁平结构，V1 是 {code,msg,data} 的信封，这里统一把 data 拆出来）。
 // target 可以是 Key 字符串（按默认站点）或 Key 记录（带 site，提交/查询都走这条）。
-async function call(target, { method = 'POST', path: pathname, json, form, timeoutMs = 60000 }) {
+// tolerateTaskError 只给查询用：查询接口里「任务失败」也是 200 + errorCode（805 等），
+// 那是任务状态而不是接口报错，要交给上层判断，否则任务会永远卡在「进行中」。
+async function call(target, { method = 'POST', path: pathname, json, form, timeoutMs = 60000, tolerateTaskError = false }) {
   const keyValue = typeof target === 'string' ? target : String(target?.key || '');
   const site = (typeof target === 'string' ? RUNNINGHUB.site : rhSiteOf(target?.site)) || RUNNINGHUB.site;
   const headers = { Authorization: `Bearer ${keyValue}`, Accept: 'application/json', 'User-Agent': USER_AGENT };
@@ -393,7 +393,9 @@ async function call(target, { method = 'POST', path: pathname, json, form, timeo
   if (!res.ok && res.status >= 500) throw upstreamError(RUNNINGHUB.label, res.status, `http_${res.status}`, payload?.raw || `HTTP ${res.status}`, payload);
   // V2：扁平结构，errorCode 为空字符串才算成功。
   if (payload && Object.hasOwn(payload, 'errorCode')) {
-    if (payload.errorCode) throw rhError(payload, res.status, `http_${res.status}`);
+    // 带 status 字段的说明这是「任务的结果」，不是「接口调不动了」，查询时照常返回。
+    const isTaskResult = typeof payload.status === 'string' && Object.hasOwn(payload, 'taskId');
+    if (payload.errorCode && !(tolerateTaskError && isTaskResult)) throw rhError(payload, res.status, `http_${res.status}`);
     return payload;
   }
   // V1：{code, msg, data}，code 是 0 才算成功。
@@ -449,8 +451,10 @@ export async function submitWorkflow(lease, workflowId, nodeInfoList, { instance
 // V2 的 /openapi/v2/query 所有模型、工作流共用一个。返回 {status, results, usage, errorCode, ...}。
 // 任务 id 只在它提交的那个站点上有效，所以要整条 Key 记录（带 site），不能只给 Key 字符串。
 // 传字符串时按默认站点走（老记录没有 site 字段时的兜底）。
+// 注意：任务失败时平台照样回 200，只是 errorCode=805、status=FAILED，所以这里要 tolerateTaskError，
+// 否则失败任务会被当成接口错误抛出去，轮询永远停在「进行中」。
 export async function queryTask(target, taskId) {
-  return call(target, { path: '/openapi/v2/query', json: { taskId: String(taskId) }, timeoutMs: 20000 });
+  return call(target, { path: '/openapi/v2/query', json: { taskId: String(taskId) }, timeoutMs: 20000, tolerateTaskError: true });
 }
 
 // 状态归一：平台是大写；多认几个别处的写法，页面只认 queued / in_progress / completed / failed。

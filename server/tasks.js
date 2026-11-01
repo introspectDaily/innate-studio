@@ -13,8 +13,10 @@ import { apiKey, autodlToken, minimaxKey } from './keys.js';
 import { callArk, callMinimax, ERROR_HINTS } from './ark.js';
 import { getResult } from './autodl.js';
 import { normalizeStatus as runninghubStatus, queryTask, releaseTask, rhHasKey, rhKeys } from './runninghub.js';
+import { rhWorkflow } from '../shared/runninghub.ts';
 import { makeThumb } from './thumbs.js';
 import { syncCredits } from './credits.js';
+import { stopPreview, startPreview } from './rhpreview.js';
 
 const STATUS_ALIASES = {
   queued: 'queued', pending: 'queued', submitted: 'queued', created: 'queued',
@@ -78,16 +80,27 @@ const PLATFORMS = {
       if (!key) throw new HttpError(404, 'no_api_key', 'RunningHub 的 Key 都配置没了');
       const payload = await queryTask(key, id);
       const status = runninghubStatus(payload?.status);
+      // 平台可能一次返回好几个文件（成片 + 一次采样的片段）。登记表里写明了成片在哪个节点，
+      // 把它排到前面：主文件、播放器都用第一个。
+      const primary = new Set(rhWorkflow(item.rh?.key)?.outputNodes || []);
       const results = (Array.isArray(payload?.results) ? payload.results : [])
         .map((result) => {
           const ext = String(result?.outputType || result?.fileType || '').toLowerCase().replace(/^\./, '');
           const type = RH_FILE_KINDS[ext] || '';
-          return { url: result?.url || result?.fileUrl, ...(ext && { file_type: ext }), ...(type && { type }) };
+          return { url: result?.url || result?.fileUrl, nodeId: result?.nodeId ? String(result.nodeId) : '', ...(ext && { file_type: ext }), ...(type && { type }) };
         })
-        .filter((result) => result.url && result.type);
+        .filter((result) => result.url && result.type)
+        .sort((a, b) => (primary.has(b.nodeId) ? 1 : 0) - (primary.has(a.nodeId) ? 1 : 0));
       if (status === 'failed') {
-        const raw = payload?.errorMessage || payload?.failedReason?.exception_message || '';
-        return { status: 'failed', results, error: raw || '任务执行失败' };
+        // 平台把失败原因放在 failedReason 里：异常类型、死在哪个节点、还有一段可读的建议。
+        // 最常见的是显存爆了（OOM），这个要单独翻译给用户，不然只看到「工作流运行失败」没法处理。
+        const reason = payload?.failedReason || {};
+        const type = String(reason.exception_type || '');
+        const node = reason.node_name ? `${reason.node_id || '?'} ${reason.node_name}` : '';
+        const advice = String(reason.exception_message || payload?.errorMessage || '').trim();
+        const code = /outofmemory/i.test(type) || /VRAM OOM/i.test(advice) ? 'vram_oom' : '';
+        const raw = [type && `异常类型：${type}`, node && `失败节点：${node}`, advice].filter(Boolean).join('\n');
+        return { status: 'failed', results, error: { message: raw || '任务执行失败', code } };
       }
       return { status: status || 'in_progress', ...(results.length ? { results } : {}), ...(payload?.usage ? { usage: payload.usage } : {}) };
     },
@@ -163,7 +176,11 @@ export async function pollTask(space, item) {
       item.error = { message: '查询超时，请稍后重新查询。', code: 'poll_timeout' };
     }
     // 到终态了：平台占用的东西（RunningHub 的并发位子）该还回去了。
-    if (!isPending(item)) PLATFORMS[item.provider].settle?.(item);
+    if (!isPending(item)) {
+      PLATFORMS[item.provider].settle?.(item);
+      // 实时预览的 WS 也到点就断：任务不会再有新的中间帧了。
+      stopPreview(item.id);
+    }
     polling.delete(item.id);
     // AutoDL 的结果里有平台给的时长，按秒计费时拿它对账。
     syncCredits(space, item, { seconds: Number(item.results?.[0]?.duration) || 0 });
@@ -185,11 +202,21 @@ function resultExt(item) {
 // 下载的结果不是音频、视频、图片时（多半是一段错误说明）不算下载成功。
 const DOWNLOAD_REJECT = /^(application\/json|text\/)/i;
 
+// 结果地址拼成绝对地址。
+// 平台的域名可能留空（RunningHub 就是：结果放在对象存储上，不是 runninghub 自己的域名），
+// 这时候地址本身就是完整的绝对地址，直接用它——拿空串当基准会抛 Invalid URL，
+// 结果就是任务在平台上跑完了、文件却一个都下不下来。
+export function absUrl(url, platform) {
+  const base = String(platform?.baseUrl || '');
+  return base ? new URL(url, base) : new URL(url);
+}
+
 // 下载一个结果地址到 tmp。只有平台自己的域名下才带上令牌，避免把令牌发给别的主机。
 async function fetchInto(url, tmp, platform) {
-  const target = new URL(url, platform.baseUrl);
+  const base = String(platform.baseUrl || '');
+  const target = absUrl(url, platform);
   const headers = {};
-  if (target.origin === new URL(platform.baseUrl).origin && platform.key()) {
+  if (base && target.origin === new URL(base).origin && platform.key()) {
     headers.Authorization = platform.authScheme === 'raw' ? platform.key() : `Bearer ${platform.key()}`;
   }
   const res = await fetch(target, { headers, signal: AbortSignal.timeout(10 * 60 * 1000) });
@@ -356,4 +383,32 @@ export function settleHistory(space) {
     changed = true;
   }
   if (changed) space.save('history');
+}
+
+// 服务重启后接着跑。
+// 记录是写在盘上的，平台上那些任务照旧在跑——所以关掉再开，应该像没关过一样：
+// 还在跑的继续查状态，跑完了但文件没存下来的再存一次。
+// 返回接上了几个任务（给启动日志报个数）。
+export function resumePending(space) {
+  let changed = false;
+  let resumed = 0;
+  for (const item of space.history) {
+    if (isPending(item)) {
+      resumed += 1;
+      // lastPolledAt 是旧的，轮询循环的第一个 tick 就会去查，不用特别处理。
+      // RunningHub 的实时预览：地址记在记录上，重启后重新连上，任务还在跑就有中间帧。
+      if (item.provider === 'runninghub' && item.rhPreview?.url) {
+        startPreview(item.id, item.rhPreview.url, item.rhPreview.clientId);
+      }
+      continue;
+    }
+    // 平台上跑完了、本机却没存下文件：上次可能是服务关着，也可能是地址/网络的问题。
+    // 重启就是一次新的机会，把次数放开重来一遍（不然它会一直卡在「保存失败」）。
+    if (item.status === 'completed' && !item.localFile && item.remoteUrl && (item.downloadAttempts || 0) >= MAX_DOWNLOAD_ATTEMPTS) {
+      item.downloadAttempts = 0;
+      changed = true;
+    }
+  }
+  if (changed) space.save('history');
+  return resumed;
 }

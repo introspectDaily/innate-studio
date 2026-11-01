@@ -180,6 +180,108 @@ test('价格跟着机器档位走', () => {
   assert.equal(rhCost('没有这个工作流'), null);
 });
 
+test('省显存的参数都在：一采/二采分辨率、帧数、分块、注意力分组', () => {
+  const plan = rhPlan(SWAP, {
+    ref_image_0: 'a',
+    ref_image_1: 'b',
+    ref_video_0: 'v',
+    prompt: '换成她',
+    megapixels: 0.4,
+    upscale_megapixels: 0.6,
+    max_frames: 72,
+    ff_chunks: 8,
+    ff_seq_threshold: 2048,
+    attn_head_chunks: 16,
+    upscaler_chunking: true,
+    upscaler_force_unload: true,
+  });
+  const value = (nodeId, field) => plan.nodeInfoList.find((item) => item.nodeId === nodeId && item.fieldName === field)?.fieldValue;
+  assert.equal(value('209', 'megapixels'), 0.4);
+  assert.equal(value('247', 'value'), 0.6);
+  assert.equal(value('286', 'frame_load_cap'), 72);
+  assert.equal(value('202', 'head_chunks'), 16);
+  assert.equal(value('206', 'enable_chunking'), true);
+  assert.equal(value('206', 'force_unload'), true);
+  // 分块前馈一采（277）和二采（201）各挂了一个，一个参数两个节点都要改到。
+  assert.equal(value('201', 'chunks'), 8);
+  assert.equal(value('277', 'chunks'), 8);
+  assert.equal(value('201', 'seq_threshold'), 2048);
+  assert.equal(value('277', 'seq_threshold'), 2048);
+});
+
+test('画质档：一选就把一整套推荐值套上去', () => {
+  const rules = rhRules(SWAP);
+  // 画质档本身是规则里的一格（下拉），默认「自定义」。
+  assert.equal(rules.preset.type, 'enum');
+  assert.equal(rules.preset.default, '自定义');
+  assert.ok(rules.preset.options.some((option) => option.label === '省显存（24G 保底）'));
+
+  const plan = rhPlan(SWAP, { ref_image_0: 'a', ref_image_1: 'b', ref_video_0: 'v', prompt: 'x', preset: '省显存（24G 保底）' });
+  const value = (nodeId, field) => plan.nodeInfoList.find((item) => item.nodeId === nodeId && item.fieldName === field)?.fieldValue;
+  assert.equal(value('209', 'megapixels'), 0.3);
+  assert.equal(value('247', 'value'), 0.5);
+  assert.equal(value('286', 'frame_load_cap'), 96);
+  assert.equal(value('201', 'chunks'), 4);
+  assert.equal(value('277', 'chunks'), 4);
+  assert.equal(value('201', 'seq_threshold'), 2048);
+  assert.equal(value('202', 'head_chunks'), 8);
+  assert.equal(value('206', 'enable_chunking'), true);
+});
+
+test('画质档不覆盖用户自己改过的参数', () => {
+  const plan = rhPlan(SWAP, {
+    ref_image_0: 'a',
+    ref_image_1: 'b',
+    ref_video_0: 'v',
+    prompt: 'x',
+    preset: '省显存（24G 保底）',
+    megapixels: 0.8, // 用户手动抬高一采分辨率
+    ff_chunks: 16, // 用户手动把分块调大
+  });
+  const value = (nodeId, field) => plan.nodeInfoList.find((item) => item.nodeId === nodeId && item.fieldName === field)?.fieldValue;
+  assert.equal(value('209', 'megapixels'), 0.8);
+  assert.equal(value('201', 'chunks'), 16);
+  assert.equal(value('277', 'chunks'), 16);
+  // 没动过的还是按档走。
+  assert.equal(value('202', 'head_chunks'), 8);
+  // 记录里存的是实际跑的值。
+  assert.equal(plan.inputs.megapixels, 0.8);
+});
+
+test('画质档在创作页也生效：那页每个参数都带着默认值上来', () => {
+  const rules = rhRules(SWAP);
+  const values = formValues({ input_rules: rules });
+  assert.equal(values.preset, '自定义');
+  const { inputs } = flowInputs(rules, {
+    prompt: '换成她',
+    media: [
+      { kind: 'image', url: '/media/uploads/a.png' },
+      { kind: 'image', url: '/media/uploads/b.png' },
+      { kind: 'video', url: '/media/uploads/v.mp4' },
+    ],
+    extra: { ...values, preset: '省显存（24G 保底）' },
+  });
+  const plan = rhPlan(SWAP, inputs);
+  const value = (nodeId, field) => plan.nodeInfoList.find((item) => item.nodeId === nodeId && item.fieldName === field)?.fieldValue;
+  assert.equal(value('209', 'megapixels'), 0.3);
+  assert.equal(value('202', 'head_chunks'), 8);
+});
+
+test('页面没带的参数，用登记表里的默认值补上', () => {
+  // 画布那边只有用户动过的参数会带过来（没带的就落回平台保存的那份工作流，
+  // 而那份的 286.frame_load_cap 是 0 = 整段视频，一漏传就又走回 OOM 那条路）。
+  const plan = rhPlan(SWAP, { ref_image_0: 'a', ref_image_1: 'b', ref_video_0: 'v', prompt: 'x' });
+  const value = (nodeId, field) => plan.nodeInfoList.find((item) => item.nodeId === nodeId && item.fieldName === field)?.fieldValue;
+  assert.equal(value('286', 'frame_load_cap'), 96);
+  assert.equal(value('247', 'value'), 1);
+  assert.equal(value('209', 'megapixels'), 0.5);
+  assert.equal(value('209', 'aspect_ratio'), '16:9 (Widescreen)');
+  assert.equal(value('271', 'save_output'), true);
+  assert.equal(value('201', 'chunks'), 2);
+  // 记录里存的是实际跑的值。
+  assert.equal(plan.inputs.max_frames, 96);
+});
+
 test('每个登记的工作流都能编译出规则，键不重复', () => {
   const seen = new Set();
   for (const workflow of RH_WORKFLOWS) {
