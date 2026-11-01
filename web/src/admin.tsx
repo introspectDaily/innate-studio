@@ -545,6 +545,21 @@ function AutodlKey() {
 // 每个 Key 只露头尾：管理面板是给管理员看的，但截图、录屏、投屏时也不该把整串 Key 露出去。
 // 站点：RunningHub 有国内站（runninghub.cn）和海外站（runninghub.ai），两个站的 Key、工作流 id 都不通用，
 // 所以每个 Key 旁边标出它属于哪个站，工作流也按站点分别显示配没配 id。
+// 「在跑」问的是 RunningHub 平台上的数（currentTaskCounts），不是本地计数：同一个 Key 可能还有别人在用，
+// 本地只知道自己派出去几单，会显得比实际空。平台没答上来的 Key 才退回本地数，并标一个「本地」。
+interface RhKeyInfo {
+  title: string;
+  hint: string;
+  site: string;
+  siteLabel: string;
+  concurrency: number;
+  running: number;
+  // 这个数字是 RunningHub 平台给的，还是平台没答上来时本地自己数的。
+  measured: 'platform' | 'local';
+  localRunning: number;
+  full: boolean;
+}
+
 interface RhPool {
   configured: boolean;
   source: string;
@@ -553,18 +568,22 @@ interface RhPool {
   total: number;
   concurrency: number;
   running: number;
+  live: { at: number; ok: boolean; error: string; ttl: number };
   sites: { site: string; label: string; host: string; keys: number; concurrency: number }[];
-  keys: { title: string; hint: string; site: string; siteLabel: string; concurrency: number; running: number; full: boolean }[];
+  keys: RhKeyInfo[];
   workflows: { key: string; name: string; kind: string; ids: Record<string, string>; ready: boolean; missing: string[] }[];
 }
 
 // 站点标签：老版服务端没有 sites 字段时兜底。
 const RH_SITE_FALLBACK: Record<string, string> = { cn: '国内站', ai: '海外站' };
+// 一页十个：和「设置 → Agent Keys」一样的分页，Key 多了不至于把弹窗拉成一长条。
+const RH_PAGE_SIZE = 10;
 
 function RunninghubKeys() {
   const [pool, setPool] = useState<RhPool | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [page, setPage] = useState(1);
 
   async function load(showToast = false) {
     setBusy(true);
@@ -586,16 +605,24 @@ function RunninghubKeys() {
   const envName = pool?.envVar || 'RUNNINGHUB_KEYS_FILE';
   const siteLabel = (site: string) => pool?.sites.find((item) => item.site === site)?.label || RH_SITE_FALLBACK[site] || site;
   const sites = pool?.sites?.length ? pool.sites : [{ site: 'cn', label: '国内站' }, { site: 'ai', label: '海外站' }];
+  // 翻页在前端算。current 夹住越界的页码：Key 文件改少了不用手动回页。
+  const keys = pool?.keys || [];
+  const pageCount = Math.max(1, Math.ceil(keys.length / RH_PAGE_SIZE));
+  const current = Math.min(page, pageCount);
+  const visible = keys.slice((current - 1) * RH_PAGE_SIZE, current * RH_PAGE_SIZE);
+  // 平台状态没取到时，页脚和每个 Key 上都要说清楚：现在看到的是本地计数。
+  const stale = Boolean(pool?.live && !pool.live.ok);
 
   return (
-    <FormRow
-      label="RunningHub 密钥池"
-      desc={
-        <>
-          ComfyUI 工作流（海螺 H3 人物替换等）用它。Key 配在环境变量 <span className="mono">{envName}</span> 指向的 JSON 文件里，支持多个、各带自己的并发数和站点（<span className="mono">site</span>：<span className="mono">cn</span> 国内站 / <span className="mono">ai</span> 海外站），一个占满就换下一个。
-        </>
-      }
-    >
+    // 这一块不是「左边一行字、右边一个控件」：Key 一多，右侧的宽度会把左边的说明挤成一列一个字。
+    // 所以名称和说明在上、整份列表在下，各占满整行。
+    <div className="rh-block">
+      <div className="form-label">
+        RunningHub 密钥池
+        <span className="form-desc">
+          ComfyUI 工作流（海螺 H3 人物替换等）用它。Key 配在环境变量 <span className="mono">{envName}</span> 指向的 JSON 文件里，支持多个、各带自己的并发数和站点（<span className="mono">site</span>：<span className="mono">cn</span> 国内站 / <span className="mono">ai</span> 海外站），一个占满就换下一个。下面的「在跑」是 RunningHub 平台上的数，别人用同一个 Key 跑的任务也算在内。
+        </span>
+      </div>
       <div className="rh-pool">
         {(error || pool?.error) && <span className="muted">{error || pool?.error}</span>}
         {!error && !pool && <span className="muted">读取中…</span>}
@@ -606,36 +633,53 @@ function RunninghubKeys() {
             <span className="mono">[{'{'}"title": "国内主账号", "key": "…", "site": "cn", "concurrency": 2{'}'}]</span>。
           </span>
         )}
-        {pool?.keys.map((key) => (
+        {visible.map((key) => (
           <div className="rh-pool-row" key={`${key.title}-${key.hint}`}>
             <span className="rh-pool-title ellipsis">{key.title}</span>
             <span className="badge badge-pending">{key.siteLabel || siteLabel(key.site)}</span>
             <span className="mono muted">{key.hint}</span>
-            <span className={`badge ${key.full ? 'badge-pending' : 'badge-ok'}`}>{`${key.running}/${key.concurrency}`}</span>
+            <span
+              className={`badge ${key.full ? 'badge-pending' : 'badge-ok'}`}
+              title={key.measured === 'platform' ? 'RunningHub 平台上的在跑任务数（含别人用同一个 Key 跑的）' : `平台状态没问到，这是本地计数（${key.localRunning}）`}
+            >{`${key.running}/${key.concurrency}`}</span>
             {key.full && <span className="muted">已满</span>}
+            {key.measured === 'local' && <span className="muted">本地</span>}
           </div>
         ))}
+        {pageCount > 1 && (
+          <div className="key-pager">
+            <span>
+              第 {current} / {pageCount} 页
+            </span>
+            <button className="btn btn-sm" type="button" disabled={current <= 1} onClick={() => setPage(current - 1)}>
+              上一页
+            </button>
+            <button className="btn btn-sm" type="button" disabled={current >= pageCount} onClick={() => setPage(current + 1)}>
+              下一页
+            </button>
+          </div>
+        )}
         {pool?.configured && (
           <div className="rh-pool-foot">
-            <span className="muted">{`共 ${pool.total} 个 Key，可并行 ${pool.concurrency} 个，正在跑 ${pool.running} 个`}</span>
+            <span className="muted">{`共 ${pool.total} 个 Key，可并行 ${pool.concurrency} 个，${stale ? '本地记着在跑' : '平台在跑'} ${pool.running} 个`}</span>
             {pool.sites?.map((site) => (
               <span className="muted" key={site.site}>{`${site.label} ${site.keys} 个`}</span>
             ))}
-            {pool.source && <span className="muted ellipsis">{`来源：${pool.source}`}</span>}
+            {pool.live?.at ? <span className="muted">{`更新于 ${fmtTime(pool.live.at)}`}</span> : null}
             <button className="btn btn-sm" type="button" disabled={busy} onClick={() => load(true)}>
               刷新
             </button>
           </div>
         )}
+        {stale && <span className="muted">{pool?.live?.error || '没问到 RunningHub 平台的在跑数，显示的是本地计数。'}</span>}
+        {pool?.source && <span className="muted ellipsis">{`来源：${pool.source}`}</span>}
         {pool?.workflows.length ? (
           <div className="rh-pool-flows">
             {pool.workflows.map((workflow) => (
-              <div className="rh-pool-row" key={workflow.key}>
+              <div className="rh-pool-flow" key={workflow.key}>
                 <span className="rh-pool-title ellipsis">{workflow.name}</span>
                 {workflow.ready ? (
-                  <span className="mono muted">
-                    {sites.map((site) => `${site.label} ${workflow.ids?.[site.site] || '未配'}`).join(' · ')}
-                  </span>
+                  <span className="mono muted">{sites.map((site) => `${site.label} ${workflow.ids?.[site.site] || '未配'}`).join(' · ')}</span>
                 ) : (
                   <span className="muted">{`未配置工作流 ID：${workflow.missing.join(' / ')}`}</span>
                 )}
@@ -644,7 +688,7 @@ function RunninghubKeys() {
           </div>
         ) : null}
       </div>
-    </FormRow>
+    </div>
   );
 }
 

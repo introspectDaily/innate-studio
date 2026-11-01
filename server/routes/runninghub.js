@@ -57,6 +57,7 @@ route('GET', /^\/api\/runninghub\/workflows$/, async () => {
 route('GET', /^\/api\/runninghub\/preview\/([^/]+)$/, async ({ params }) => previewState(decodeURIComponent(params[0])) || { state: 'none' });
 
 // 管理面板：有哪些 Key、各自跑到多满、每个工作流配的是哪个 workflowId。只给管理员，Key 只露头尾。
+// 「跑到多满」问的是 RunningHub 平台（currentTaskCounts），不是本地计数——同一个 Key 可能还有别人在用。
 route('GET', /^\/api\/runninghub\/keys$/, async () => rhKeyState(), 'admin');
 
 // ---------- 素材：页面给的值 → 平台认的 fileName ----------

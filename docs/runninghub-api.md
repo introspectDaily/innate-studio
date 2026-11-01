@@ -564,7 +564,11 @@ RunningHub 和 **AutoDL 几乎同构**：都是「提交 → taskId → 查 → 
 
 1. **价格**：每个候选端点的实际 `consumeMoney`，用来建我们的预估价格表。
 2. **并发**：企业级-共享 Key 的实际并发上限（文档只说要联系扩容）。
-3. **`/uc/openapi/accountStatus` 的成功返回结构**（是否含余额、RH 币）。
+3. ~~`/uc/openapi/accountStatus` 的成功返回结构~~ ✅ 已实测（2026-11-01，海外站）：
+   `POST /uc/openapi/accountStatus`，header `Authorization: Bearer <API Key>` + body `{apiKey}`（body 必须带，缺了不认），
+   返回 `{"code":0,"msg":"success","data":{"remainCoins":"10351","currentTaskCounts":"0","remainMoney":null,"currency":null,"apiType":"NORMAL"}}`。
+   `currentTaskCounts` 是该账号此刻在跑的任务数（含别人用同一个 Key 跑的），已接入管理面板（`server/runninghub.js` 的 `rhLiveUsage`）。
+   顺带实测：网页端的 `POST /api/billing/usage/wideDetails` 用 API Key 调返回 `{"code":412,"msg":"TOKEN_INVALID"}`，它只认浏览器登录 token。
 4. **模型 API 是否支持 `webhookUrl`**（文档只在工作流 API 提到）。
 5. **`.cn` / `.ai` 的 Key 是否互通**。
 6. **参考素材上限**：多图参考端点（`imageUrls[]`）最多几张、单张多大。

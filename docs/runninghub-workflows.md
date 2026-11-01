@@ -113,6 +113,15 @@ Key、工作流 ID、素材库都不通用，同一个工作流在两边导出�
 
 页面上只看得到头尾（`rh-x…abcd`）和站点：`/api/runninghub/keys` 只有管理员能调，返回的是 `hint` 不是 `key`。
 
+管理面板上每个 Key 的「在跑 N/M」问的是 **RunningHub 平台**，不是本地计数。原因：这份 Key 文件里的 Key 可能同时给
+别的项目、别的人用，本地只知道自己派出去几单，界面会显得比实际空。取数走 `POST /uc/openapi/accountStatus`
+（网页端在用的账号接口，文档没公开，实测可用）：body 带 `apiKey`，回 `currentTaskCounts` —— 就是这个账号此刻在跑的任务数，
+别人跑的也算在内。结果缓存 20 秒，Key 多了也只并发问 4 个。某个 Key 问到失败（失效、超时）时，那一行退回本地计数并标「本地」，
+不影响别的 Key。
+
+> 另一条 `GET/POST /api/billing/usage/wideDetails`（网页端「账单明细」）**用 API Key 打不通**，只认浏览器里的登录 token，
+> 用 API Key 会返回 `{"code":412,"msg":"TOKEN_INVALID"}`，所以没用它。
+
 ## 素材怎么进工作流
 
 节点里的图片、视频字段要的是 RunningHub 上的 **fileName**，不是 URL。所以提交前每个素材都走一遍

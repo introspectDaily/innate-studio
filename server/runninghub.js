@@ -134,7 +134,9 @@ export function rhKeys() {
 export const rhHasKey = () => rhKeys().length > 0;
 export const rhKeyById = (id) => rhKeys().find((item) => item.id === id) || null;
 
-// /api/state 里那一小块：只说到「配了几个、总共能并行几个、现在在跑几个、涉及哪几个站点」，不列 Key。
+// /api/state 里那一小块：只说到「配了几个、总共能并行几个、我们派出去了几个、涉及哪几个站点」，不列 Key。
+// 这里的 running 是**我们自己**占的位子：/api/state 每次刷新都会走一遍，不便挨个问平台。
+// 平台上真实在跑多少（别人也用同一个 Key 的时候会更多）由 rhKeyState() 给管理面板。
 export function rhSummary() {
   const keys = rhKeys();
   return {
@@ -146,11 +148,73 @@ export function rhSummary() {
   };
 }
 
-// 管理面板用：有哪些 Key（各自在哪个站点、跑到多满）、从哪儿读的。**只给头尾**，不给完整 Key。
+// ---------- 平台侧运行状态 ----------
+// 为什么要问平台：这份 Key 文件里的 Key 可能同时被别的项目、别的人用，本地只知道自己派出去几单，
+// 平台上真正占着并发的是「我们 + 别人」。管理面板上的「在跑」要的是后者。
+// 用 /uc/openapi/accountStatus（网页端在用的账号接口，文档没公开，实测可用）：
+//   POST {apiKey} → {code:0, data:{remainCoins:"10351", currentTaskCounts:"0", remainMoney, currency, apiType}}
+// currentTaskCounts 就是这个账号（这个 Key）此刻在跑的任务数，按 Key 各查各的。
+// 另一条 /api/billing/usage/wideDetails（网页端「账单明细」）**用 API Key 打不通**：
+// 返回 {code:412,msg:"TOKEN_INVALID"}，它只认浏览器里的登录 token，所以不选它。
+// 查平台要花时间，所以答案缓存 20 秒：打开管理面板、点刷新都够用，也不会把平台打烦。
+const LIVE_TTL_MS = 20 * 1000;
+const LIVE_TIMEOUT_MS = 8 * 1000;
+const LIVE_CONCURRENCY = 4;
+let live = { at: 0, stamp: '', counts: new Map(), error: '', ok: false };
+let inflight = null;
+
+async function collectLive(keys, stamp) {
+  const counts = new Map();
+  const failed = [];
+  let cursor = 0;
+  // 同时最多问 4 个：Key 多了也不至于一口气打出几十个请求。
+  const worker = async () => {
+    while (cursor < keys.length) {
+      const item = keys[cursor++];
+      try {
+        // 这个接口要 body 里再带一份 apiKey（V1 的老规矩），只给 header 不认。
+        const data = await call(item, { path: '/uc/openapi/accountStatus', json: { apiKey: item.key }, timeoutMs: LIVE_TIMEOUT_MS });
+        const value = Number(data?.currentTaskCounts);
+        if (Number.isFinite(value)) counts.set(item.id, Math.max(0, Math.round(value)));
+        else failed.push(item.title);
+      } catch {
+        // 单个 Key 查不到（失效、被封、超时）不影响别的 Key：这个 Key 的页面数字回落到本地计数。
+        failed.push(item.title);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(LIVE_CONCURRENCY, keys.length) }, worker));
+  live = {
+    at: Date.now(),
+    stamp,
+    counts,
+    ok: counts.size > 0,
+    error: failed.length ? `有 ${failed.length} 个 Key 没问到平台状态（${failed.slice(0, 2).join('、')}${failed.length > 2 ? ' 等' : ''}）` : '',
+  };
+  return live;
+}
+
+// 每个 Key 在平台上跑着几个任务。Key 文件变了（stamp 变了）就重新问，不看缓存。
+export function rhLiveUsage() {
+  const keys = rhKeys();
+  const stamp = `${readKeySource().stamp}|${keys.map((item) => `${item.id}:${item.site}`).join(',')}`;
+  if (live.stamp === stamp && live.at && Date.now() - live.at < LIVE_TTL_MS) return Promise.resolve(live);
+  // 两个人同时打开管理面板时只发一轮请求。
+  if (inflight) return inflight;
+  inflight = collectLive(keys, stamp).finally(() => {
+    inflight = null;
+  });
+  return inflight;
+}
+
+// 管理面板用：有哪些 Key（各自在哪个站点、平台上跑到多满）、从哪儿读的。**只给头尾**，不给完整 Key。
 // 这一份只给管理员（routes/runninghub.js 里 access = 'admin'）。
-export function rhKeyState() {
+// running 优先用平台给的 currentTaskCounts；平台没答上来的那个 Key 才用本地计数，并标注 measured。
+export async function rhKeyState() {
   const keys = rhKeys();
   const source = readKeySource();
+  const usage = await rhLiveUsage();
+  const runningOf = (item) => usage.counts.get(item.id) ?? slotsOf(item.id).size;
   return {
     configured: keys.length > 0,
     source: source.source,
@@ -158,7 +222,9 @@ export function rhKeyState() {
     error: source.error || cache.error || '',
     total: keys.length,
     concurrency: keys.reduce((sum, item) => sum + item.concurrency, 0),
-    running: keys.reduce((sum, item) => sum + slotsOf(item.id).size, 0),
+    running: keys.reduce((sum, item) => sum + runningOf(item), 0),
+    // 这批数字是问的谁：platform = RunningHub 平台（含别人跑的），local = 本地占位（平台查不到时的兜底）。
+    live: { at: usage.at, ok: usage.ok, error: usage.error, ttl: LIVE_TTL_MS },
     // 两个站点各自配了几个 Key、能并行几个（一个站没配就是 0）。
     sites: RH_SITES.map((site) => ({
       site,
@@ -168,8 +234,19 @@ export function rhKeyState() {
       concurrency: keys.filter((item) => item.site === site).reduce((sum, item) => sum + item.concurrency, 0),
     })),
     keys: keys.map((item) => {
-      const running = slotsOf(item.id).size;
-      return { title: item.title, hint: item.hint, site: item.site, siteLabel: rhSiteLabel(item.site), concurrency: item.concurrency, running, full: running >= item.concurrency };
+      const running = runningOf(item);
+      return {
+        title: item.title,
+        hint: item.hint,
+        site: item.site,
+        siteLabel: rhSiteLabel(item.site),
+        concurrency: item.concurrency,
+        running,
+        // 这个数字是平台给的，还是（平台没答上来时）本地自己数的。
+        measured: usage.counts.has(item.id) ? 'platform' : 'local',
+        localRunning: slotsOf(item.id).size,
+        full: running >= item.concurrency,
+      };
     }),
     // 每个工作流在两个站点上各配的是哪个 workflowId、配好了没有（工作流 id 不是密钥，可以照实显示）。
     workflows: RH_WORKFLOWS.map((workflow) => {

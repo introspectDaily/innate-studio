@@ -1271,7 +1271,9 @@ input[type='search']::-webkit-search-cancel-button { -webkit-appearance: none; }
 .ve-frame-badge { left: var(--sp-4); top: var(--sp-4); }
 .ve-frame-time { right: var(--sp-4); bottom: var(--sp-4); }
 
-/* 管理面板里的 RunningHub 密钥池：一行一个 Key，只露头尾；下面一行是汇总，再下面是接进来的工作流。 */
+/* 管理面板里的 RunningHub 密钥池：名称和说明在上、列表在下（横排会把说明挤成一列一个字），
+   一行一个 Key，只露头尾；翻页和汇总在列表下面，再下面是接进来的工作流。 */
+.rh-block { display: flex; flex-direction: column; gap: var(--sp-8); min-width: 0; }
 .rh-pool { display: flex; flex-direction: column; gap: var(--sp-4); min-width: 0; }
 .rh-pool-row { display: flex; align-items: center; gap: var(--sp-8); min-width: 0; font-size: var(--text-caption); }
 .rh-pool-title { flex: 0 1 auto; max-width: 40%; color: var(--text); }
@@ -1279,3 +1281,6 @@ input[type='search']::-webkit-search-cancel-button { -webkit-appearance: none; }
 .rh-pool-foot { display: flex; align-items: center; gap: var(--sp-8); flex-wrap: wrap; padding-top: var(--sp-4); border-top: 1px solid var(--border); font-size: var(--text-caption); }
 .rh-pool-foot .muted:first-child { flex: 1; }
 .rh-pool-flows { display: flex; flex-direction: column; gap: var(--sp-4); padding-top: var(--sp-4); border-top: 1px solid var(--border); }
+/* 工作流那两行没有站点和在跑数，名字可以占宽一点。 */
+.rh-pool-flow { display: flex; align-items: baseline; gap: var(--sp-8); min-width: 0; font-size: var(--text-caption); }
+.rh-pool-flow .rh-pool-title { max-width: 50%; }

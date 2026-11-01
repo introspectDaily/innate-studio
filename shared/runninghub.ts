@@ -175,7 +175,7 @@ const HAILUO_PARAMS: RhParam[] = [
         ],
       },
       { key: 'megapixels', label: '一采分辨率（百万像素）', nodeId: '209', field: 'megapixels', type: 'float', min: 0.2, max: 1.5, default: 0.5, hint: '第一遍采样的分辨率：0.5 ≈ 960×544，0.3 ≈ 832×480。显存不够就往下降' },
-      { key: 'shorter_edge', label: '参考图短边', nodeId: '246', field: 'value', type: 'int', min: 512, max: 1536, default: 928, hint: '送进模型的参考图会缩到这个短边' },
+      { key: 'shorter_edge', label: '参考图短边', nodeId: '246', field: 'value', type: 'int', min: 512, max: 1536, default: 928, hint: '参考图先缩到这个短边（只缩不放），是给参考编码省算力的预算上限。没有对齐要求：H3 节点内部会把宽高各自取整到 32 的倍数再编码，填别的数不会报错。填太小角色一致性变差；填太大参考 token 变多，每一步采样都更慢更吃显存。928 是作者给 24G 机器的折中' },
   { key: 'steps', label: '采样步数', nodeId: '212', field: 'steps', type: 'int', min: 4, max: 20, default: 6, hint: '这个流用了 4 步加速 LoRA，超过 8 步一般不会更好' },
   // 种子放 205：它是最终那一遍采样（196）的噪声源。182 是预览那一遍的，改了看不到结果。
   { key: 'seed', label: '随机种子', nodeId: '205', field: 'noise_seed', type: 'int', min: 0, max: 4294967295, default: 0, hint: '填同一个数可以复现同一条结果' },
