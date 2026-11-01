@@ -427,6 +427,40 @@ interface ParamText {
   onChange: (value: string) => void;
 }
 
+// 时长这类连续参数：滑杆粗调 + 输入框精确填（13.2 这种小数直接打，不用一格一格拖）。
+// 输入框自己记一份草稿：受控值会把「13.」这种打到一半的数抹掉，只有能解析成数字时才回写给滑杆。
+function RangeField({ label, min, max, step = 1, marks, value, disabled, onChange }: { label: string; min: number; max: number; step?: number; marks: number[]; value: number; disabled?: boolean; onChange: (value: number) => void }) {
+  const [draft, setDraft] = useState(() => String(value));
+  const [last, setLast] = useState(value);
+  // 外面改了值（拖滑杆、点「与原视频一致」）就同步输入框；自己打字回写时值没变，不会互相打架。
+  if (value !== last) {
+    setLast(value);
+    setDraft(String(value));
+  }
+  const commit = (text: string, clamp: boolean) => {
+    setDraft(text);
+    const number = Number(text);
+    if (text.trim() === '' || !Number.isFinite(number)) {
+      // 空着、或者只打了个负号就离开：回到原来的值，别把参数留成空。
+      if (clamp) setDraft(String(value));
+      return;
+    }
+    // 打字过程中不夹（不然「13.2」打到一半就被改成 13），离开输入框时再夹回范围、收成步进的精度（0.1 秒）。
+    const decimals = String(step).split('.')[1]?.length || 0;
+    const fixed = clamp ? Number(Math.min(max, Math.max(min, number)).toFixed(decimals)) : number;
+    if (clamp) setDraft(String(fixed));
+    if (fixed !== value) onChange(fixed);
+  };
+  return (
+    <div className="duration-row">
+      <Slider label={label} min={min} max={max} step={step} marks={marks} value={value} disabled={disabled} onChange={onChange} />
+      <label className="input duration-field">
+        <input type="number" inputMode="decimal" min={min} max={max} step={step} value={draft} disabled={disabled} aria-label={`${label}（可直接输入）`} onChange={(e) => commit(e.currentTarget.value, false)} onBlur={(e) => commit(e.currentTarget.value, true)} />
+      </label>
+    </div>
+  );
+}
+
 // 点开之后的那一页：每组参数一行小方块（时长是滑杆），文字参数一行输入框。它画在画布外面的浮层里，所以自己记着选了什么。
 function ParamSheet({ groups, texts = [] }: { groups: ParamGroup[]; texts?: ParamText[] }) {
   const [picked, setPicked] = useState(() => groups.map((group) => group.value));
@@ -442,22 +476,20 @@ function ParamSheet({ groups, texts = [] }: { groups: ParamGroup[]; texts?: Para
           <div className="popover-title">{group.label}</div>
           {group.range ? (
             <>
-              <div className="duration-row">
-                <Slider
-                  label={group.label}
-                  min={group.range.min}
-                  max={group.range.max}
-                  step={group.range.step}
-                  marks={marks(group.range.max)}
-                  // 浮层不会跟着外面重画，滑杆的位置取本地的 picked，拖动才跟手。
-                  value={Number(picked[index]) || group.range.min}
-                  disabled={picked[index] === 'auto'}
-                  onChange={(value) => {
-                    setPicked((now) => now.map((v, n) => (n === index ? String(value) : v)));
-                    group.onChange(String(value));
-                  }}
-                />
-              </div>
+              <RangeField
+                label={group.label}
+                min={group.range.min}
+                max={group.range.max}
+                step={group.range.step}
+                marks={marks(group.range.max)}
+                // 浮层不会跟着外面重画，滑杆和输入框都取本地的 picked，拖动/打字才跟手。
+                value={Number(picked[index]) || group.range.min}
+                disabled={picked[index] === 'auto'}
+                onChange={(value) => {
+                  setPicked((now) => now.map((v, n) => (n === index ? String(value) : v)));
+                  group.onChange(String(value));
+                }}
+              />
               {group.sync && (
                 <div className="cnode-auto">
                   <button
