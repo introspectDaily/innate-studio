@@ -4,7 +4,7 @@
 // 用法：
 //   node docs/runninghub/plan-params.mjs                          # 默认参数
 //   node docs/runninghub/plan-params.mjs --preset "省显存（24G 保底）"
-//   node docs/runninghub/plan-params.mjs --max-frames 120 --ff-chunks 8 --attn-head-chunks 16
+//   node docs/runninghub/plan-params.mjs --video-seconds 8 --ff-chunks 8 --attn-head-chunks 16
 //   node docs/runninghub/plan-params.mjs --workflow hailuo-h3-swap-9 --dry
 //
 // --dry 只打印上面这张表；不给 --dry 时会把 nodeInfoList 整个打出来（带素材位和提示词），
@@ -29,7 +29,7 @@ if (!workflow) {
 }
 
 // 参数键 → 命令行开关名。和 shared/runninghub.ts 的 HAILUO_PARAMS 对得上。
-const PARAMS = ['megapixels', 'upscale_megapixels', 'max_frames', 'ff_chunks', 'ff_seq_threshold', 'attn_head_chunks', 'shorter_edge', 'steps', 'seed'];
+const PARAMS = ['megapixels', 'upscale_megapixels', 'video_seconds', 'ff_chunks', 'ff_seq_threshold', 'attn_head_chunks', 'shorter_edge', 'steps', 'seed'];
 const inputs = { prompt: '（提示词）', ref_image_0: '/media/uploads/ref1.png', ref_video_0: '/media/uploads/source.mp4' };
 for (const key of PARAMS) {
   const value = flag(key.replace(/_/g, '-'));
@@ -44,7 +44,9 @@ if (preset !== undefined) inputs.preset = preset;
 const machine = flag('machine');
 if (machine !== undefined) inputs.machine = machine;
 
-const plan = rhPlan(workflow, inputs);
+// --source-duration 模拟「服务端量到了原视频时长」：不传 video_seconds 时默认与它一致。
+const sourceDuration = Number(flag('source-duration', 0)) || 0;
+const plan = rhPlan(workflow, inputs, sourceDuration > 0 ? { videoDuration: sourceDuration } : {});
 if (plan.problems.length) {
   console.log('提交会被拦下：');
   for (const problem of plan.problems) console.log('  -', problem);
@@ -71,7 +73,7 @@ console.log('  画质档        ', plan.inputs.preset ?? '自定义');
 console.log('  机器          ', plan.machine);
 console.log('  一采分辨率    ', value('209', 'megapixels'), '百万像素');
 console.log('  二采分辨率    ', value('247', 'value'), '百万像素');
-console.log('  源视频帧数上限', value('286', 'frame_load_cap'), '（0 = 整段）');
+console.log('  输出时长      ', plan.inputs.video_seconds, '秒（', value('286', 'frame_load_cap'), '帧，24fps ）');
 console.log('  FFN 分块/阈值 ', value('201', 'chunks'), '/', value('201', 'seq_threshold'), '（二采）　', value('277', 'chunks'), '/', value('277', 'seq_threshold'), '（一采）');
 console.log('  注意力分组    ', value('202', 'head_chunks'));
 console.log('  放大分块/卸载 ', value('206', 'enable_chunking'), '/', value('206', 'force_unload'));
@@ -87,4 +89,4 @@ if (has('dry')) {
 // 粗略的显存提示：token 数 ∝ 帧数 × 面积（海螺 H3 是音视频一体模型）。
 const mp = Number(value('209', 'megapixels') ?? 0.5);
 const frames = Number(value('286', 'frame_load_cap') ?? 0);
-console.log('\n粗算：一采', mp, 'MP', frames ? `× ${frames} 帧` : '× 整段视频', '→ 24G 机器上帧数建议 ≤ 120');
+console.log('\n粗算：一采', mp, 'MP', frames ? `× ${frames} 帧（约 ${Math.round((frames / 24) * 10) / 10} 秒）` : '× 整段视频', '→ 24G 机器上帧数建议 ≤ 120');

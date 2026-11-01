@@ -724,9 +724,16 @@ function FlowRow({ fieldKey, name, rule, value }: { fieldKey: string; name: stri
     );
   }
   if (kind === 'number') {
+    // 登记成滑块的参数（输出时长这种）：滑杆加数字框，范围按规则来。
+    const slide = rule.slider && rule.min !== undefined && rule.max !== undefined;
+    const marks = rule.min !== undefined && rule.max !== undefined ? Array.from({ length: Math.min(Math.floor(rule.max - rule.min) + 1, 16) }, (_, i) => Math.round(rule.min! + ((rule.max! - rule.min!) * i) / 15)) : [];
+    const num = Number(value ?? rule.default ?? rule.min) || 0;
     return (
       <FormRow label={name} desc={desc}>
-        <NumberInput value={String(value ?? '')} onInput={(text) => setFlowValue(fieldKey, text)} min={rule.min} max={rule.max} step={rule.step || (rule.type === 'integer' ? 1 : 0.01)} aria-label={name} />
+        <div className={slide ? 'duration-row' : undefined}>
+          {slide && <Slider label={name} min={rule.min!} max={rule.max!} step={rule.step} marks={rule.type === 'integer' ? marks : []} value={num} onChange={(next) => setFlowValue(fieldKey, next)} />}
+          <NumberInput value={String(value ?? '')} onInput={(text) => setFlowValue(fieldKey, text)} min={rule.min} max={rule.max} step={rule.step || (rule.type === 'integer' ? 1 : 0.01)} aria-label={name} />
+        </div>
       </FormRow>
     );
   }
@@ -781,8 +788,9 @@ function FlowToolbar() {
   const known = items.some((item) => item.uuid === flow.workflow?.uuid);
   const options = [...(flow.workflow && !known ? [{ value: flow.workflow.uuid, label: flow.workflow.name }] : []), ...items.map((item) => ({ value: item.uuid, label: item.name, note: item.fromCredits != null ? `起 ${item.fromCredits} 积分` : undefined }))];
   const rules = definition?.input_rules || {};
-  // 工具栏上只放时长和分辨率这种常改的；其余（模式、开关、种子、数字）在「参数」面板里。
-  const durationKey = Object.keys(rules).find((key) => (key === 'duration' || key === 'audio_duration') && (rules[key].type === 'integer' || rules[key].type === 'number'));
+  // 工具栏上只放时长和分辨率这种常改的（登记成滑块的参数也是时长性质，一并提上来）；
+  // 其余（模式、开关、种子、数字）在「参数」面板里。
+  const durationKey = Object.keys(rules).find((key) => (key === 'duration' || key === 'audio_duration' || rules[key].slider) && (rules[key].type === 'integer' || rules[key].type === 'number'));
   const resolutionKey = Object.keys(rules).find((key) => key === 'resolution' && rules[key].type === 'enum');
   const more = Object.entries(rules).filter(([key, rule]) => ruleKind(rule) !== 'media' && key !== durationKey && key !== resolutionKey && flowPrimaryKey() !== key);
   return (
@@ -823,7 +831,7 @@ function FlowNumberPanel({ ruleKey }: { ruleKey: string }) {
     <>
       <div className="popover-title">{name}</div>
       <div className="duration-row">
-        <Slider label={name} min={min} max={max} marks={integer ? marks : []} value={value} onChange={(next) => setFlowValue(ruleKey, next)} />
+        <Slider label={name} min={min} max={max} step={rule.step} marks={integer ? marks : []} value={value} onChange={(next) => setFlowValue(ruleKey, next)} />
         <label className="input duration-field">
           <input type="number" inputMode={integer ? 'numeric' : 'decimal'} min={min} max={max} step={rule.step || (integer ? 1 : 0.01)} value={String(composer.studio.flow.values[ruleKey] ?? '')} aria-label={name} onChange={(e) => setFlowValue(ruleKey, e.currentTarget.value)} />
           {rule.max != null && rule.max <= 15 && <span>秒</span>}

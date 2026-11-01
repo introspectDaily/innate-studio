@@ -33,7 +33,8 @@ export interface TextData {
 // 节点里曾经有过、后来被换掉的那一份内容。就地替换时旧的退到这里，「更多 → 历史版本」里随时换得回来。
 export interface Kept {
   recordId?: string;
-  upload?: { url: string; name: string };
+  // duration 是上传时浏览器量好的视频时长（秒），「输出时长默认与原视频一致」要用。
+  upload?: { url: string; name: string; duration?: number };
   // 换下来的时间。生成记录本身还有生成时间，列表里有记录就用记录的时间。
   at: number;
 }
@@ -46,7 +47,7 @@ export interface Generated {
   // 名字后面的编号。
   no?: number;
   recordId?: string;
-  upload?: { url: string; name: string };
+  upload?: { url: string; name: string; duration?: number };
   // 这个节点再次生成的结果放在哪：true 就地替换，false 另开一个新节点。不写就跟随设置里的默认（另开新节点）。
   inPlace?: boolean;
   // 换下来的内容，最近的在前。

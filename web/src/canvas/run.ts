@@ -19,6 +19,36 @@ type AnyData = Partial<ImageData & VideoData & AudioData & TextData>;
 
 export const recordOf = (data: { recordId?: string }): HistoryItem | undefined => (data.recordId ? state.history.find((h) => h.id === data.recordId) : undefined);
 
+// 这个节点里的视频有多长（秒）：生成出来的记录上有（服务端做小图时量的）；
+// 本机上传的在上传/挂上节点时由浏览器量好，存在 upload.duration 里。两处都没有就是 0——由服务端兜底探测。
+export function sourceDurationOf(node: Node): number {
+  const data = node.data as AnyData;
+  const record = recordOf(data);
+  const fromRecord = Number(record?.media?.duration) || 0;
+  if (fromRecord) return fromRecord;
+  return Number((data as { upload?: { duration?: number } }).upload?.duration) || 0;
+}
+
+// 浏览器端量一个视频有多长（秒）：同源的 /media 文件只读元数据，不用下载整个文件。量不到（格式不认、加载失败）返回 0。
+export function probeVideoDuration(url: string): Promise<number> {
+  return new Promise((resolve) => {
+    const video = document.createElement('video');
+    video.preload = 'metadata';
+    video.muted = true;
+    const finish = (value: number) => {
+      clearTimeout(timer);
+      video.onloadedmetadata = video.onerror = null;
+      video.removeAttribute('src');
+      video.load();
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(0), 10_000);
+    video.onloadedmetadata = () => finish(Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0);
+    video.onerror = () => finish(0);
+    video.src = url;
+  });
+}
+
 // 一个节点现在能交给下游的东西：本机的一个文件。还没生成完、或者文件不在本机，就是 null。
 export function outputOf(node: Node): { url: string; kind: Kind; name: string } | null {
   const data = node.data as AnyData;
@@ -97,6 +127,15 @@ function flowRequest(sources: { link: LinkData; node: Node }[], node: Node, prom
   // 视频的分辨率、时长是节点上直接选的；图片、音频的分辨率和其他参数一样放在「参数」里（flowValues）。
   const isVideo = node.type === 'video';
   const { inputs, problems, placed } = flowInputs(flow.rules, { prompt, media, resolution: isVideo ? data.resolution : String(data.flowValues?.resolution ?? ''), duration: isVideo ? data.duration : undefined, extra: data.flowValues });
+  // 「输出时长（秒）」这类滑块参数的动态默认：用户没在参数里动过、连进来的源视频量得到时长时，
+  // 默认与原视频一致（服务端对量不到的还有一层兜底探测，规则一样）。cleanInputs 会把没带的参数
+  // 补成登记表的静态默认值，所以这里要判断「没动过」得看 flowValues，然后把它盖回去。
+  const secondsKey = Object.keys(flow.rules ?? {}).find((key) => flow.rules?.[key].slider);
+  if (secondsKey && data.flowValues?.[secondsKey] === undefined) {
+    const video = sources.find((s) => s.link.kind === 'video');
+    const duration = video ? sourceDurationOf(video.node) : 0;
+    if (duration > 0) inputs[secondsKey] = Math.min(Math.ceil(duration * 10) / 10, flow.rules?.[secondsKey]?.max ?? Infinity);
+  }
   if (problems.length && !forQuote) throw new Error(problems[0]);
   // 记录里的素材快照：以后复现这条记录时，输入框里的格子能按当时的样子恢复。
   const refs: Record<string, Ref> = {};

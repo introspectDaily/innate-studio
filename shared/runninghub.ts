@@ -71,6 +71,11 @@ export interface RhParam {
   choices?: RhChoice[];
   min?: number;
   max?: number;
+  step?: number;
+  // 对外的单位是「秒」、节点字段要的是帧数的参数（输出时长）。提交时按 fps 换算：
+  // 秒 × fps（向上取整）= frame_load_cap。fps 是工作流内部 force 的固定帧率，不是源视频的。
+  unit?: 'seconds';
+  fps?: number;
   default?: string | number | boolean;
   // 界面上那句说明（为什么这么填）。
   hint?: string;
@@ -179,10 +184,11 @@ const HAILUO_PARAMS: RhParam[] = [
   { key: 'steps', label: '采样步数', nodeId: '212', field: 'steps', type: 'int', min: 4, max: 20, default: 6, hint: '这个流用了 4 步加速 LoRA，超过 8 步一般不会更好' },
   // 种子放 205：它是最终那一遍采样（196）的噪声源。182 是预览那一遍的，改了看不到结果。
   { key: 'seed', label: '随机种子', nodeId: '205', field: 'noise_seed', type: 'int', min: 0, max: 4294967295, default: 0, hint: '填同一个数可以复现同一条结果' },
-  // 时长和显存是绑死的：海螺 H3 是音视频一体模型，帧数一多 token 就爆炸。
-  // 实测：14.9 秒（362 帧）× 1344×768 在标准 24G 上直接 torch.OutOfMemoryError（死在二采的采样器上），
-  // 而作者自己跑的样例是 125 帧（约 5.2 秒）。所以这里把源视频截断的帧数做成参数，默认给一个跑得动的长度。
-  { key: 'max_frames', label: '源视频最长帧数', nodeId: '286', field: 'frame_load_cap', type: 'int', min: 0, max: 1200, default: 96, hint: '0 = 用整段视频（最容易 OOM）。24G 机器建议 ≤ 120（约 5 秒）；想跑长片要同时降成片分辨率或换 48G 机器' },
+  // 输出时长和显存是绑死的：海螺 H3 是音视频一体模型，帧数一多 token 就爆炸。
+  // 实测：14.9 秒 × 1344×768 在标准 24G 上直接 torch.OutOfMemoryError（死在二采的采样器上），
+  // 而作者自己跑的样例是 125 帧（约 5.2 秒）。这里把时长做成秒数滑块，默认与原视频一致——
+  // 用户没动过时服务端先量一下原视频多长（探测不到才用这里的 default 兜底），提交前换算成 286.frame_load_cap。
+  { key: 'video_seconds', label: '输出时长（秒）', nodeId: '286', field: 'frame_load_cap', type: 'float', unit: 'seconds', fps: 24, min: 1, max: 30, step: 0.1, default: 5, hint: '默认与原视频一致（精确到 0.1 秒）。时长和显存绑死：标准 24G 建议 ≤ 5 秒，想跑长片要降成片分辨率或换 48G 机器' },
   // 二采（节点 247）决定成片的输出尺寸：1 百万像素 ≈ 1344×768，是显存的大头。
   { key: 'upscale_megapixels', label: '二采分辨率（百万像素）', nodeId: '247', field: 'value', type: 'float', min: 0.3, max: 2, default: 1, hint: '第二遍采样（成片）的分辨率：1 ≈ 1344×768，0.5 ≈ 960×544。显存不够就往下降' },
   // 一采的结果（节点 271）默认只放在临时目录，平台不返回。打开它，一次采样的片段也会一起回到我们这边。
@@ -207,11 +213,11 @@ const HAILUO_PRESETS: RhPreset[] = [
   {
     key: 'safe-24g',
     label: '省显存（24G 保底）',
-    note: '标准 24G 机器上最稳的一档：分辨率压低、时长截到 5 秒内、注意力分组加倍',
+    note: '标准 24G 机器上最稳的一档：分辨率压低、时长 4 秒左右、注意力分组加倍',
     values: {
       megapixels: 0.3,
       upscale_megapixels: 0.5,
-      max_frames: 96,
+      video_seconds: 4,
       ff_chunks: 4,
       ff_seq_threshold: 2048,
       attn_head_chunks: 8,
@@ -222,11 +228,11 @@ const HAILUO_PRESETS: RhPreset[] = [
   {
     key: 'standard-24g',
     label: '标准（24G 能跑）',
-    note: '作者那套参数：960×544 起、放大到 1344×768、时长约 5 秒',
+    note: '作者那套参数：960×544 起、放大到 1344×768、时长 4 秒左右',
     values: {
       megapixels: 0.5,
       upscale_megapixels: 1,
-      max_frames: 96,
+      video_seconds: 4,
       ff_chunks: 2,
       ff_seq_threshold: 4096,
       attn_head_chunks: 4,
@@ -237,11 +243,11 @@ const HAILUO_PRESETS: RhPreset[] = [
   {
     key: 'quality-48g',
     label: '画质优先（48G+）',
-    note: '成片放大到约 1600×896、时长放到 7 秒左右，需要加强档机器',
+    note: '成片放大到约 1600×896、时长 7 秒左右，需要加强档机器',
     values: {
       megapixels: 0.5,
       upscale_megapixels: 1.5,
-      max_frames: 168,
+      video_seconds: 7,
       ff_chunks: 4,
       ff_seq_threshold: 2048,
       attn_head_chunks: 8,
@@ -390,8 +396,17 @@ export function rhRules(workflow: RhWorkflow): Record<string, InputRule> {
     } else if (param.type === 'text') {
       rules[param.key] = { type: 'string', label: param.label, description: param.hint, default: typeof param.default === 'string' ? param.default : '' };
     } else {
-      // integer / number 两种规则，界面上一律是数字输入框。
-      rules[param.key] = { type: param.type === 'int' ? 'integer' : 'number', label: param.label, description: param.hint, min: param.min, max: param.max, default: param.default };
+      // integer / number 两种规则：普通的是数字输入框；unit 是秒的（输出时长）带 min/max 画成滑块。
+      rules[param.key] = {
+        type: param.type === 'int' ? 'integer' : 'number',
+        label: param.label,
+        description: param.hint,
+        min: param.min,
+        max: param.max,
+        ...(param.step ? { step: param.step } : {}),
+        ...(param.unit === 'seconds' ? { slider: true } : {}),
+        default: param.default,
+      };
     }
   }
 
@@ -407,6 +422,35 @@ export function rhMachineOf(workflow: RhWorkflow, inputs: Record<string, unknown
   const machines = rhMachines(workflow);
   const chosen = String(inputs[RH_MACHINE_KEY] ?? '');
   return machines.find((machine) => machine.label === chosen)?.value || machines[0]?.value || MACHINE_DEFAULT;
+}
+
+// ---------- 显存防呆 ----------
+
+// 每档机器的显存预算，单位是「帧 × 二采百万像素」（H3 是音视频一体模型，token 数 ∝ 帧数 × 面积，正好这两个参数决定爆不爆）。
+// 拿实测标定：96 帧 × 1.0MP 在标准 24G 上稳（多次成功）；312 帧 × 1.0MP 直接 RuntimeError: VRAM grow failed
+// （死在二采采样器 200 上，只差 420MB）；168 帧 × 1.5MP（画质优先档）本来就是给 48G 设计的。
+// 取 120 当 24G 的上限：96×1=96 有富余，120×1=120 是边界（默认 5 秒全片过），再往上就是赌运气。
+const VRAM_BUDGET: Record<string, number> = { default: 120, plus: 320, ultra: Number.POSITIVE_INFINITY };
+
+// 「帧 × 百万像素」超预算时给一句能照着调的话（降时长、降分辨率或换机器），提交前拦下，免得白花一次的钱。
+export function rhVramProblem(workflow: RhWorkflow, inputs: Record<string, unknown>, machine: string): string {
+  const budget = VRAM_BUDGET[machine];
+  if (!budget || !Number.isFinite(budget)) return '';
+  const secondsParam = (workflow.params || []).find((param) => param.unit === 'seconds' && param.fps);
+  const mpParam = (workflow.params || []).find((param) => param.key === 'upscale_megapixels');
+  if (!secondsParam || !mpParam) return '';
+  const fps = secondsParam.fps || 24;
+  const seconds = Number(inputs[secondsParam.key]);
+  const mp = Number(inputs[mpParam.key]);
+  if (!(seconds > 0) || !(mp > 0)) return '';
+  const frames = Math.ceil(seconds * fps);
+  const load = frames * mp;
+  if (load <= budget) return '';
+  const fitSeconds = Math.floor((budget / mp / fps) * 10) / 10;
+  const fitMp = Math.floor((budget / frames) * 100) / 100;
+  const machineLabel = rhMachines(workflow).find((item) => item.value === machine)?.label || machine;
+  const bigger = rhMachines(workflow).find((item) => VRAM_BUDGET[item.value] > load)?.label;
+  return `这套参数大概率显存溢出（${frames} 帧 × ${mp} 百万像素 ≈ ${Math.round(load)}，超过${machineLabel}的预算约 ${Math.round(budget)}）：把输出时长降到 ${fitSeconds} 秒以内、或二采分辨率降到 ${fitMp} 百万像素以内${bigger ? `，或换「${bigger}」机器` : ''}。显存爆掉平台照样扣钱`;
 }
 
 // 这个工作流要传哪几种素材（画布上挑选列表、历史记录里按类型分类用）。
@@ -432,8 +476,22 @@ export interface RhPlan {
 
 // 把页面给的入参按登记表检查一遍，再拼成 nodeInfoList。
 // 注意：素材值在这里还是页面给的短地址（/media/... 或链接），由调用方换成像 RunningHub 认的 fileName。
-export function rhPlan(workflow: RhWorkflow, raw: Record<string, unknown> = {}): RhPlan {
+// meta 用来喂动态默认值：videoDuration 是原视频的时长（秒），「输出时长」在用户没填时默认与它一致。
+export function rhPlan(workflow: RhWorkflow, raw: Record<string, unknown> = {}, meta: { videoDuration?: number } = {}): RhPlan {
   const rules = rhRules(workflow);
+  // 动态默认值要在 cleanInputs 之前塞：那边看到值就会放行（并按 min/max 夹住校验）。
+  // 原视频比滑块上限还长时夹到 max——超长的部分截掉，跟旧行为一致，提示写在参数的 hint 里。
+  for (const param of workflow.params || []) {
+    if (param.unit !== 'seconds') continue;
+    const given = raw?.[param.key];
+    if (given !== undefined && given !== null && given !== '') continue;
+    const duration = Number(meta.videoDuration);
+    if (Number.isFinite(duration) && duration > 0) {
+      // 与原视频一致，精确到 0.1 秒：向上取整到一位小数（13.2 就是 13.2，不硬凑整秒），
+      // 换算成帧时（秒 × fps 向上取整）依然保证不丢结尾。
+      raw = { ...raw, [param.key]: Math.min(Math.ceil(duration * 10) / 10, param.max ?? Infinity) };
+    }
+  }
   const cleaned = cleanInputs(rules, raw);
   // 素材缺失的说法自己重写一遍：cleanInputs 只知道规则的标签，拼出来是「请填写图片参考图 2」，
   // 这里的槽位标签本身已经是「角色卡」「原视频」这样的人话，直接说「请上传角色卡」。
@@ -536,11 +594,21 @@ export function rhPlan(workflow: RhWorkflow, raw: Record<string, unknown> = {}):
     }
     const number = Number(value);
     if (!Number.isFinite(number)) continue;
+    // 「输出时长（秒）」：节点要的是帧数。工作流把源视频 force 到固定帧率（H3 是 24），
+    // frame_load_cap 数的是换算后的帧，所以 帧数 = 秒 × fps，向上取整保证不丢结尾。
+    if (param.unit === 'seconds') {
+      const frames = Math.ceil(number * (param.fps || 24));
+      for (const nodeId of targets) push(nodeId, param.field, frames);
+      continue;
+    }
     const out = param.type === 'int' ? Math.round(number) : number;
     for (const nodeId of targets) push(nodeId, param.field, out);
   }
 
   const machine = rhMachineOf(workflow, inputs);
+  // 显存防呆放最后：机器档位和入参都齐了才能算。拦下来的是「必爆的组合」，照着提示调就行。
+  const vram = rhVramProblem(workflow, inputs, machine);
+  if (vram) problems.push(vram);
   // 机器档位不进 nodeInfoList（它是提交参数），但留在 inputs 里：记录要还原用户当时选的档位。
   return { inputs, problems, nodeInfoList, machine, uploads };
 }

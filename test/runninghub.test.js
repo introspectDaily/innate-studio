@@ -180,7 +180,7 @@ test('价格跟着机器档位走', () => {
   assert.equal(rhCost('没有这个工作流'), null);
 });
 
-test('省显存的参数都在：一采/二采分辨率、帧数、分块、注意力分组', () => {
+test('省显存的参数都在：一采/二采分辨率、时长、分块、注意力分组', () => {
   const plan = rhPlan(SWAP, {
     ref_image_0: 'a',
     ref_image_1: 'b',
@@ -188,7 +188,7 @@ test('省显存的参数都在：一采/二采分辨率、帧数、分块、注�
     prompt: '换成她',
     megapixels: 0.4,
     upscale_megapixels: 0.6,
-    max_frames: 72,
+    video_seconds: 3, // 3 秒 × 24fps = 72 帧
     ff_chunks: 8,
     ff_seq_threshold: 2048,
     attn_head_chunks: 16,
@@ -209,6 +209,50 @@ test('省显存的参数都在：一采/二采分辨率、帧数、分块、注�
   assert.equal(value('277', 'seq_threshold'), 2048);
 });
 
+test('输出时长换算成帧数：按工作流的固定帧率（24）向上取整，记录里存秒数', () => {
+  const plan = rhPlan(SWAP, { ref_image_0: 'a', ref_image_1: 'b', ref_video_0: 'v', prompt: 'x', video_seconds: 6.5 });
+  const value = (nodeId, field) => plan.nodeInfoList.find((item) => item.nodeId === nodeId && item.fieldName === field)?.fieldValue;
+  assert.equal(value('286', 'frame_load_cap'), 156); // 6.5 × 24 = 156
+  assert.equal(plan.inputs.video_seconds, 6.5);
+});
+
+test('输出时长的默认值与原视频一致：没填时按量到的时长换算，超长夹到滑块上限', () => {
+  const value = (plan) => plan.nodeInfoList.find((item) => item.nodeId === '286' && item.fieldName === 'frame_load_cap')?.fieldValue;
+  // 13.2 秒的原视频：按 0.1 秒向上取整还是 13.2（不硬凑整秒）× 24fps = 316.8 → 317 帧，完整覆盖源片。
+  const plan = rhPlan(SWAP, { ref_image_0: 'a', ref_image_1: 'b', ref_video_0: 'v', prompt: 'x' }, { videoDuration: 13.2 });
+  assert.equal(value(plan), 317);
+  assert.equal(plan.inputs.video_seconds, 13.2);
+  // 13.04 秒：向上取整到 0.1 秒是 13.1（宁可多一帧也不丢结尾）。
+  const odd = rhPlan(SWAP, { ref_image_0: 'a', ref_image_1: 'b', ref_video_0: 'v', prompt: 'x' }, { videoDuration: 13.04 });
+  assert.equal(value(odd), 315); // 13.1 × 24 = 314.4 → 315
+  assert.equal(odd.inputs.video_seconds, 13.1);
+  // 45 秒的长片：夹到滑块上限 30 秒（720 帧），超出部分截掉。
+  const long = rhPlan(SWAP, { ref_image_0: 'a', ref_image_1: 'b', ref_video_0: 'v', prompt: 'x' }, { videoDuration: 45 });
+  assert.equal(value(long), 720);
+  // 量不到时长（没有 ffmpeg / 远程链接）：落回登记表的默认值 5 秒。
+  const fallback = rhPlan(SWAP, { ref_image_0: 'a', ref_image_1: 'b', ref_video_0: 'v', prompt: 'x' });
+  assert.equal(value(fallback), 120);
+});
+
+test('显存防呆：帧数 × 二采分辨率超了机器预算就拦下，提示怎么调', () => {
+  // 真实事故：13 秒源片 312 帧 × 1.0MP 在标准 24G 上 RuntimeError: VRAM grow failed（白扣一次钱）。
+  const value = (plan) => plan.nodeInfoList.find((item) => item.nodeId === '286' && item.fieldName === 'frame_load_cap')?.fieldValue;
+  const plan = rhPlan(SWAP, { ref_image_0: 'a', ref_image_1: 'b', ref_video_0: 'v', prompt: 'x', video_seconds: 13 });
+  assert.equal(value(plan), 312);
+  assert.ok(plan.problems.some((problem) => problem.includes('显存溢出') && problem.includes('312 帧')), plan.problems.join('；'));
+  // 提示要能照着调：给出降时长、降分辨率、换机器三条路。
+  assert.ok(plan.problems[0].includes('加强 48G'));
+  // 同样的参数换 48G 机器就放行。
+  const plus = rhPlan(SWAP, { ref_image_0: 'a', ref_image_1: 'b', ref_video_0: 'v', prompt: 'x', video_seconds: 13, machine: '加强 48G' });
+  assert.deepEqual(plus.problems, []);
+  // 默认 5 秒（120 帧 × 1.0MP = 120）正好压线放行。
+  const fit = rhPlan(SWAP, { ref_image_0: 'a', ref_image_1: 'b', ref_video_0: 'v', prompt: 'x' });
+  assert.deepEqual(fit.problems, []);
+  // 省显存档把二采压到 0.5MP，13 秒也能过预算（312 × 0.5 = 156）……不，超 120，同样要拦。
+  const safe = rhPlan(SWAP, { ref_image_0: 'a', ref_image_1: 'b', ref_video_0: 'v', prompt: 'x', video_seconds: 13, upscale_megapixels: 0.5 });
+  assert.ok(safe.problems.some((problem) => problem.includes('显存溢出')));
+});
+
 test('画质档：一选就把一整套推荐值套上去', () => {
   const rules = rhRules(SWAP);
   // 画质档本身是规则里的一格（下拉），默认「自定义」。
@@ -220,7 +264,7 @@ test('画质档：一选就把一整套推荐值套上去', () => {
   const value = (nodeId, field) => plan.nodeInfoList.find((item) => item.nodeId === nodeId && item.fieldName === field)?.fieldValue;
   assert.equal(value('209', 'megapixels'), 0.3);
   assert.equal(value('247', 'value'), 0.5);
-  assert.equal(value('286', 'frame_load_cap'), 96);
+  assert.equal(value('286', 'frame_load_cap'), 96); // 档里 4 秒 × 24fps
   assert.equal(value('201', 'chunks'), 4);
   assert.equal(value('277', 'chunks'), 4);
   assert.equal(value('201', 'seq_threshold'), 2048);
@@ -270,16 +314,17 @@ test('画质档在创作页也生效：那页每个参数都带着默认值上�
 test('页面没带的参数，用登记表里的默认值补上', () => {
   // 画布那边只有用户动过的参数会带过来（没带的就落回平台保存的那份工作流，
   // 而那份的 286.frame_load_cap 是 0 = 整段视频，一漏传就又走回 OOM 那条路）。
+  // 输出时长量不到原视频时是登记表的默认值 5 秒（120 帧）；量到了就走「与原视频一致」那条路（上面测过）。
   const plan = rhPlan(SWAP, { ref_image_0: 'a', ref_image_1: 'b', ref_video_0: 'v', prompt: 'x' });
   const value = (nodeId, field) => plan.nodeInfoList.find((item) => item.nodeId === nodeId && item.fieldName === field)?.fieldValue;
-  assert.equal(value('286', 'frame_load_cap'), 96);
+  assert.equal(value('286', 'frame_load_cap'), 120);
   assert.equal(value('247', 'value'), 1);
   assert.equal(value('209', 'megapixels'), 0.5);
   assert.equal(value('209', 'aspect_ratio'), '16:9 (Widescreen)');
   assert.equal(value('271', 'save_output'), true);
   assert.equal(value('201', 'chunks'), 2);
   // 记录里存的是实际跑的值。
-  assert.equal(plan.inputs.max_frames, 96);
+  assert.equal(plan.inputs.video_seconds, 5);
 });
 
 test('每个登记的工作流都能编译出规则，键不重复', () => {

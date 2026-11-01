@@ -1086,6 +1086,11 @@ input[type='search']::-webkit-search-cancel-button { -webkit-appearance: none; }
 /* 合成一项的参数：几个值之间用小圆点隔开 */
 .cnode-param .dropdown-value { gap: 0; }
 .cnode-param .dropdown-value > span + span::before { content: "·"; margin: 0 var(--sp-8); color: var(--text-off); }
+/* 工作流的参数能攒出十来个值（0.1 · 928 · 96 · 4096…），一行放不下会顶出节点框：
+   按钮允许收缩，摘要始终单行、超宽收进省略号（不换行——两行居中会把节点底部撑得很难看），
+   完整的值在「参数」浮层里看。 */
+.cnode-param { flex: 0 1 auto; min-width: 0; justify-content: flex-start; text-align: left; }
+.cnode-param .dropdown-value { display: block; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .cnode-bar .dropdown-tool > .icon:last-child { color: var(--text-3); }
 .cnode-sheet { gap: var(--sp-12); width: 300px; padding: var(--sp-4); }
 .cnode-opts { display: flex; flex-wrap: wrap; gap: var(--sp-4); }
@@ -1095,6 +1100,9 @@ input[type='search']::-webkit-search-cancel-button { -webkit-appearance: none; }
 .cnode-opt.active .cnode-opt-note { color: inherit; opacity: 0.72; }
 .cnode-sheet .duration-row { gap: 0; }
 .cnode-auto { display: flex; align-items: center; gap: var(--sp-8); margin-top: var(--sp-8); color: var(--text-2); font-size: var(--text-ui); }
+/* 「与原视频一致」：滑杆下面的小按钮，链接样式，点一下把时长同步回量出来的值。 */
+.cnode-sync { padding: 0; border: 0; background: none; color: var(--accent); font-size: var(--text-ui); line-height: var(--lh-body); cursor: pointer; }
+.cnode-sync:hover { text-decoration: underline; }
 @media (hover: hover) { .cnode-opt:hover { color: var(--text); } }
 .cnode-opt.active { background: var(--text); color: var(--bg); }
 /* 参数面板里的自由输入（随机种子这类）：一行占满，和上面的小方块同一套圆角和字色 */

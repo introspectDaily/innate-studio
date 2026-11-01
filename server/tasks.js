@@ -98,7 +98,10 @@ const PLATFORMS = {
         const type = String(reason.exception_type || '');
         const node = reason.node_name ? `${reason.node_id || '?'} ${reason.node_name}` : '';
         const advice = String(reason.exception_message || payload?.errorMessage || '').trim();
-        const code = /outofmemory/i.test(type) || /VRAM OOM/i.test(advice) ? 'vram_oom' : '';
+        // 显存爆掉的写法不止一种：torch.OutOfMemoryError 是异常类型；ComfyUI 的「VRAM grow failed: N bytes」
+        // 会包在 RuntimeError 里（实测 312 帧 × 1.0MP 在 24G 上就是这样死的）。都归到 vram_oom 给出中文建议。
+        const oom = /outofmemory|memoryerror/i.test(type) || /vram|out of memory|\boom\b/i.test(advice);
+        const code = oom ? 'vram_oom' : '';
         const raw = [type && `异常类型：${type}`, node && `失败节点：${node}`, advice].filter(Boolean).join('\n');
         return { status: 'failed', results, error: { message: raw || '任务执行失败', code } };
       }

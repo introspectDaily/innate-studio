@@ -6,11 +6,12 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
 import { HttpError, MIME, readJsonBody, route } from '../http.js';
 import { MAX_UPLOAD_BYTES } from '../config.js';
 import { localMediaFile } from '../media.js';
 import { claim, drop, pick, resolveWorkflowId, resolveWorkflowIds, rhHasKey, rhKeyState, submitWorkflow, uploadMedia } from '../runninghub.js';
-import { RH_PROVIDER, RH_SITES, RH_WORKFLOWS, rhCost, rhMachines, rhMedia, rhPlan, rhRules, rhWorkflow, rhUuid } from '../../shared/runninghub.ts';
+import { RH_PROVIDER, RH_SITES, RH_WORKFLOWS, rhCost, rhMachines, rhMedia, rhPlan, rhRules, rhVideoKey, rhWorkflow, rhUuid } from '../../shared/runninghub.ts';
 import { applyTaskState, historyView, newItem } from '../tasks.js';
 import { previewState, startPreview, stopPreview } from '../rhpreview.js';
 import { holdCredits, syncCredits } from '../credits.js';
@@ -90,6 +91,30 @@ async function readMedia(space, value) {
   throw new HttpError(400, 'invalid_request', '素材须为本机文件、公网链接或 data URL');
 }
 
+// 「输出时长（秒）」的默认值与原视频一致：用户没自己拖过时先量一下原视频多长，交给 rhPlan 换算成帧数。
+// 和缩略图同一套做法：读 ffmpeg -i 的日志（可以用 FFMPEG_PATH 指定位置）。机器上没有 ffmpeg、
+// 文件坏了、或者素材是远程链接（不拉下来探测），就量不到——落回登记表的静态默认值。
+const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
+
+function probeVideoDuration(file) {
+  return new Promise((resolve) => {
+    execFile(FFMPEG, ['-hide_banner', '-i', file], { timeout: 15000 }, (_err, _stdout, stderr) => {
+      const time = /Duration: (\d+):(\d+):(\d+(?:\.\d+)?)/.exec(String(stderr || ''));
+      resolve(time ? Number(time[1]) * 3600 + Number(time[2]) * 60 + Number(time[3]) : null);
+    });
+  });
+}
+
+async function videoDurationOf(space, value) {
+  const url = String(value || '').trim();
+  if (!url.startsWith('/media/')) return null;
+  try {
+    return await probeVideoDuration(localMediaFile(space, url));
+  } catch {
+    return null;
+  }
+}
+
 // 提交一个工作流任务。请求体 { workflow: 登记表里的 key, inputs: {规则里的参数}, form }。提交会花钱。
 route('POST', /^\/api\/runninghub\/submit$/, async ({ req, space, user }) => {
   const { workflow: key, inputs: raw, form } = await readJsonBody(req);
@@ -104,7 +129,12 @@ route('POST', /^\/api\/runninghub\/submit$/, async ({ req, space, user }) => {
   }
   if (!rhHasKey()) throw new HttpError(503, 'no_api_key', 'RunningHub 暂未开通，请联系管理员');
 
-  const { inputs, problems, nodeInfoList, machine, uploads } = rhPlan(workflow, raw || {});
+  // 原视频时长：只给「输出时长」这类秒数参数的动态默认值用（默认与原视频一致）。
+  const meta = {};
+  const videoDuration = await videoDurationOf(space, raw?.[rhVideoKey(0)]);
+  if (videoDuration > 0) meta.videoDuration = videoDuration;
+
+  const { inputs, problems, nodeInfoList, machine, uploads } = rhPlan(workflow, raw || {}, meta);
   if (problems.length) throw new HttpError(400, 'invalid_request', problems[0], { problems });
 
   // 记录上的提示词、估价、以及提交时的定义快照（之后复现这条记录用）。

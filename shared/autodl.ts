@@ -26,6 +26,8 @@ export interface InputRule {
   min_length?: number;
   max_length?: number;
   step?: number;
+  // 有 min/max 且适合拖的数字参数（输出时长这种）画成滑块，不是输入框。
+  slider?: boolean;
   accept_types?: string[];
   options?: EnumOption[];
   node_id?: string;

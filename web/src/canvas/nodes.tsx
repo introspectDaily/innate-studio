@@ -21,7 +21,7 @@ import { VideoPlayer, AudioPlayer } from '../player.tsx';
 import { openDetail } from '../history.tsx';
 import type { Kind, Ref } from '../types.ts';
 import { BOX_HEIGHT, IMAGE_PRESETS, NODE_LABELS, OUTPAINT_PROMPT, ROLE_LABELS, canLink, keepBefore, keptOf, makeRoom, nodeWidth, linkLabel, PINS, PIN_LABELS, type AudioData, type FrameRole, type Generated, type GroupData, type ImageData, type Pin, type Preset, type StackData, type LinkData, type NodeKind, type TextData, type VideoData } from './model.ts';
-import { fitVideo, generate, isFilled, nameOf, outputOf, recordOf, runAll } from './run.ts';
+import { fitVideo, generate, isFilled, nameOf, outputOf, probeVideoDuration, recordOf, runAll, sourceDurationOf } from './run.ts';
 import { openKept } from './kept.tsx';
 import { Cropper, cropImage, grabFrame, padImage, splitGrid, type Made } from './edit.tsx';
 import { reducedMotion } from '../ui/motion.ts';
@@ -406,7 +406,9 @@ interface ParamGroup {
   // 枚举取值列成一排小方块。note 是选项下的小字说明（模型的档位差异）。
   options?: { value: string; label: string; note?: string }[];
   // 连续取值（时长）不列按钮，画滑杆；value 是 'auto' 时滑杆不可用。
-  range?: { min: number; max: number };
+  range?: { min: number; max: number; step?: number };
+  // 滑杆下的小按钮：「与原视频一致（13.2 秒）」这种一键同步。点一下把值带回量出来的数（用户拖过滑块之后还能再跟回去）。
+  sync?: { label: string; value: string };
   // 有这一项就显示「时长由模型决定」开关（模型支持自动时长时才传）。
   onAuto?: (auto: boolean) => void;
   // 按钮摘要里这一组显示什么。不写就用选中的选项名。
@@ -445,6 +447,7 @@ function ParamSheet({ groups, texts = [] }: { groups: ParamGroup[]; texts?: Para
                   label={group.label}
                   min={group.range.min}
                   max={group.range.max}
+                  step={group.range.step}
                   marks={marks(group.range.max)}
                   // 浮层不会跟着外面重画，滑杆的位置取本地的 picked，拖动才跟手。
                   value={Number(picked[index]) || group.range.min}
@@ -455,6 +458,21 @@ function ParamSheet({ groups, texts = [] }: { groups: ParamGroup[]; texts?: Para
                   }}
                 />
               </div>
+              {group.sync && (
+                <div className="cnode-auto">
+                  <button
+                    type="button"
+                    className="cnode-sync"
+                    onClick={() => {
+                      // 同步走 onChange：浮层里的 picked 和节点数据一起更新，滑块立刻跳到量出来的位置。
+                      setPicked((now) => now.map((v, n) => (n === index ? group.sync!.value : v)));
+                      group.onChange(group.sync!.value);
+                    }}
+                  >
+                    {group.sync.label}
+                  </button>
+                </div>
+              )}
               {group.onAuto && (
                 <div className="cnode-auto">
                   <Toggle
@@ -903,9 +921,10 @@ export function TextNode({ id, data: raw, selected, dragging }: NodeProps) {
 // ---------- 图片 ----------
 
 // 节点选的是工作流（AutoDL.art 或 RunningHub）时，它自己的参数放进「参数」：键就是规则里的参数名，值存在节点的 flowValues 里。
-// 枚举、开关做成一行按钮；数字、文字做成输入框（和视频的随机种子一样）。
+// 枚举、开关做成一行按钮；数字、文字做成输入框（和视频的随机种子一样）；登记成滑块的（输出时长）画滑杆。
 // skip 是节点上已经有控件的参数（视频的分辨率、时长）。
-function flowParams(model: string, values: Record<string, unknown> | undefined, onChange: (next: Record<string, unknown>) => void, skip: string[] = []): { groups: ParamGroup[]; texts: ParamText[] } {
+// dyn 是滑块参数的动态默认值（比如「与原视频一致」算出来的秒数）：用户没动过就显示它，不是登记表里的静态默认。
+function flowParams(model: string, values: Record<string, unknown> | undefined, onChange: (next: Record<string, unknown>) => void, skip: string[] = [], dyn: Record<string, unknown> = {}): { groups: ParamGroup[]; texts: ParamText[] } {
   const rules = flowSummary(model)?.rules || {};
   const groups: ParamGroup[] = [];
   const texts: ParamText[] = [];
@@ -934,6 +953,22 @@ function flowParams(model: string, values: Record<string, unknown> | undefined, 
       continue;
     }
     if (rule.type === 'integer' || rule.type === 'number') {
+      // 登记成滑块的参数（输出时长这种）：有 min/max 就画滑杆，不进输入框。
+      if (rule.slider && rule.min !== undefined && rule.max !== undefined) {
+        const seconds = Number(chosen ?? dyn[key] ?? ruleDefault(rule) ?? rule.min);
+        const measured = Number(dyn[key]);
+        groups.push({
+          label: ruleLabel(rule, key),
+          value: String(seconds),
+          // 摘要里带上单位、统一一位小数：16:9 · 5.0 秒 · 13.2 秒。
+          display: `${seconds.toFixed(1)} 秒`,
+          range: { min: rule.min, max: rule.max, step: rule.step },
+          // 量得到源视频时长就给一个一键同步：没拖过时值本来就跟着源片走，拖过之后靠它跟回去。
+          ...(measured > 0 ? { sync: { label: `与原视频一致（${measured.toFixed(1)} 秒）`, value: String(measured) } } : {}),
+          onChange: (next: string) => onChange({ ...values, [key]: Number(next) }),
+        });
+        continue;
+      }
       texts.push({
         label: ruleLabel(rule, key),
         value: String(chosen ?? ruleDefault(rule) ?? ''),
@@ -1297,7 +1332,33 @@ export function VideoNode({ id, data: raw, selected, dragging }: NodeProps) {
     set(fitVideo({ ...data, mode }));
   };
   // 模型是工作流时，它自己的枚举、开关参数（模式、风格预设…）也放进「参数」：键就是规则里的参数名。分辨率、时长用节点上直接的那两个。
-  const flowParamsHere = flowParams(data.model, data.flowValues, (next) => set({ flowValues: next }), ['resolution']);
+  // 「输出时长」这类滑块参数的动态默认：连进来的源视频量得到时长就按它显示（精确到 0.1 秒，和服务端 rhPlan 同一规则）。
+  // 生成出来的视频记录上有时长；本机上传的下面这个 effect 会用浏览器量一次存进节点。
+  const dynSeconds: Record<string, unknown> = {};
+  const sourceVideo = inputs.find((i) => i.link.kind === 'video');
+  const sourceDuration = sourceVideo ? sourceDurationOf(sourceVideo.node) : 0;
+  if (sourceDuration > 0) {
+    for (const [key, rule] of Object.entries(flowSummary(data.model)?.rules || {})) {
+      // 与原视频一致，精确到 0.1 秒（和服务端 rhPlan 的动态默认同一套规则）。
+      if (rule.slider) dynSeconds[key] = Math.min(Math.ceil(sourceDuration * 10) / 10, rule.max ?? Infinity);
+    }
+  }
+  // 本机上传的源视频还没量过时长：浏览器读一次元数据（同源 /media 文件只读头部），量到就存进上传节点的 upload.duration。
+  // 之后参数浮层、提交请求（run.ts flowRequest）都按它算「与原视频一致」；量不到（格式不认）就由服务端兜底探测。
+  const sourceUpload = sourceVideo?.node.data && (sourceVideo.node.data as { upload?: { url: string; name: string; duration?: number } }).upload;
+  useEffect(() => {
+    if (!sourceUpload || sourceUpload.duration || sourceDuration > 0) return;
+    let alive = true;
+    probeVideoDuration(sourceUpload.url).then((duration) => {
+      if (alive && duration > 0) flow.updateNodeData(sourceVideo!.node.id, { upload: { ...sourceUpload, duration } } as Partial<VideoData>);
+    });
+    return () => {
+      alive = false;
+    };
+    // 只在「还没量到」这个状态变化时跑一次，量完就不再探测。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceUpload?.url, sourceUpload?.duration, sourceDuration]);
+  const flowParamsHere = flowParams(data.model, data.flowValues, (next) => set({ flowValues: next }), ['resolution'], dynSeconds);
   const { snap } = useContext(CanvasActions);
   const shape = useShape(id);
   const hasSelfRef = Boolean(data.selfFrame || data.selfRole);
