@@ -27,6 +27,8 @@ function sendError(res, status, code, message) {
 export function startTosMock() {
   const buckets = new Map([[MOCK_TOS_BUCKET, new Map()]]);
   const log = [];
+  // 测试可以把它设成大于 0，模拟 HEAD 一时失败（超时、5xx），验证不会因此重传整份文件。
+  const state = { headFailures: 0 };
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://mock');
     const body = await readBody(req);
@@ -45,6 +47,10 @@ export function startTosMock() {
     if (!objects) return sendError(res, 404, 'NoSuchBucket', 'The specified bucket does not exist.');
 
     if (req.method === 'HEAD' && key) {
+      if (state.headFailures > 0) {
+        state.headFailures -= 1;
+        return sendError(res, 503, 'InternalError', 'mock head failure');
+      }
       const item = objects.get(key);
       if (!item) return sendError(res, 404, 'NoSuchKey', 'The specified key does not exist.');
       res.writeHead(200, { 'Content-Type': item.contentType, 'Content-Length': item.body.length, ETag: `"${key.length}"`, 'x-tos-request-id': 'mock-tos-head-object' });
@@ -102,12 +108,19 @@ export function startTosMock() {
 
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => {
-      resolve({
+      const mock = {
         url: `http://127.0.0.1:${server.address().port}`,
         buckets,
         log,
         close: () => new Promise((done) => server.close(done)),
+      };
+      Object.defineProperty(mock, 'headFailures', {
+        get: () => state.headFailures,
+        set: (value) => {
+          state.headFailures = Number(value) || 0;
+        },
       });
+      resolve(mock);
     });
   });
 }

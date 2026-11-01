@@ -293,6 +293,41 @@ test('本地素材：默认存本机；发布到 TOS 并复用有效链接', asy
   assert.equal((await call('GET', '/api/materials')).data.items.some((item) => item.url === materialUrl), false);
 });
 
+test('公网发布：按内容复用对象；HEAD 一时失败时沿用已有链接，不重传整份文件', async () => {
+  // 同一个文件名、同一份内容，放在两个不同的本机地址下：key 由内容算出，应该只上传一次。
+  const bytes = Buffer.concat([PNG, Buffer.from('same-content')]);
+  fs.writeFileSync(path.join(dataDir, 'uploads', 'dup.png'), bytes);
+  fs.writeFileSync(path.join(dataDir, 'videos', 'dup.png'), bytes);
+
+  const puts = () => mockTos.log.filter((entry) => entry.method === 'PUT' && decodeURIComponent(entry.pathname).includes('/published/')).length;
+  const before = puts();
+  const first = await call('POST', '/api/materials/publish', { url: '/media/uploads/dup.png', purpose: 'share' });
+  assert.equal(first.status, 200, JSON.stringify(first.data));
+  assert.equal(puts(), before + 1);
+
+  const second = await call('POST', '/api/materials/publish', { url: '/media/videos/dup.png', purpose: 'share' });
+  assert.equal(second.status, 200, JSON.stringify(second.data));
+  assert.equal(second.data.key, first.data.key);
+  assert.equal(second.data.url, first.data.url);
+  assert.equal(puts(), before + 1, '同一个 key 的对象已经存在，不该再 PUT 一次');
+
+  // 校验时 HEAD 失败（超时、5xx 这类临时故障）：复用已有的稳定链接，而不是把文件重传一遍。
+  mockTos.headFailures = 1;
+  const third = await call('POST', '/api/materials/publish', { url: '/media/uploads/dup.png', purpose: 'share' });
+  assert.equal(third.status, 200, JSON.stringify(third.data));
+  assert.equal(third.data.reused, true);
+  assert.equal(third.data.url, first.data.url);
+  assert.equal(puts(), before + 1);
+  assert.equal(mockTos.headFailures, 0);
+
+  // 对象真的没了（404）才该重传：删掉远端对象后再发布，会重新上传。
+  await call('DELETE', `/api/tos/objects?key=${encodeURIComponent(first.data.key)}`);
+  const fourth = await call('POST', '/api/materials/publish', { url: '/media/uploads/dup.png', purpose: 'share' });
+  assert.equal(fourth.status, 200, JSON.stringify(fourth.data));
+  assert.equal(fourth.data.key, first.data.key);
+  assert.equal(puts(), before + 2);
+});
+
 test('提交视频：换成 content 数组，本机的首帧内嵌进去；完成后把结果存到本机，用量是 token', async () => {
   const { url } = (await upload()).data;
   assert.match(url, /^\/media\/uploads\/up_[0-9a-f]+\.png$/);

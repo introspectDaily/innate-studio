@@ -221,6 +221,25 @@ function mapTosError(err, action = '访问 TOS') {
   return new HttpError(502, 'tos_error', `${action}失败：${detail}`, detail);
 }
 
+// 只有「对象确实不存在」才算失效。超时、5xx、权限这些如实抛出，别当成不存在去重传整份文件。
+function objectMissing(err) {
+  const code = err?.code || '';
+  const status = err?.statusCode || err?.response?.status;
+  if (code === 'NoSuchBucket') return false;
+  return code === 'NoSuchKey' || status === 404;
+}
+
+// 对象在不在。404 返回 false，其他错误照实抛出（由调用方决定怎么报）。
+async function objectExists(client, bucket, key) {
+  try {
+    const result = await client.headObject({ bucket, key });
+    return result?.statusCode === 200;
+  } catch (err) {
+    if (objectMissing(err)) return false;
+    throw err;
+  }
+}
+
 async function checkedClient() {
   let current;
   try {
@@ -387,44 +406,62 @@ function safePublicFileName(file) {
   return path.basename(file).replace(/[^\p{L}\p{N}._-]+/gu, '_').slice(0, 160) || 'media';
 }
 
+// 流式算内容哈希：整段视频一次 readFileSync 会占满内存、还会把事件循环堵住几百毫秒到几秒。
+function fileDigest(file) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    fs.createReadStream(file)
+      .on('error', reject)
+      .on('data', (chunk) => hash.update(chunk))
+      .on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
 // 把一个本机文件上传成 TOS 公网对象。key 里带内容哈希，同一份内容即使换了本机地址也不会重复占空间。
 export async function publishLocalFileToTos(space, localUrl, { purpose = 'share' } = {}) {
   const file = localMediaFile(space, localUrl);
   const ext = path.extname(file).toLowerCase();
   if (!SUPPORTED_EXT.has(ext)) throw new HttpError(400, 'invalid_request', '该文件类型不支持发布到 TOS');
   const { current, client } = await checkedClient();
-  const digest = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex').slice(0, 16);
+  const { size } = fs.statSync(file);
+  const digest = (await fileDigest(file)).slice(0, 16);
   const folder = purpose === 'reference' ? 'references' : 'published';
   const date = new Date().toISOString().slice(0, 10);
   const key = fullObjectKey(current.prefix, `${folder}/${date}/${digest}-${safePublicFileName(file)}`);
-  try {
-    await client.putObjectFromFile({ bucket: current.bucket, key, filePath: file, contentType: contentTypeOfKey(file), acl: 'public-read' });
-  } catch (err) {
-    throw mapTosError(err, purpose === 'reference' ? '上传参考视频' : '发布素材');
-  }
-  return {
+  const view = {
     provider: 'tos',
     key,
     url: publicObjectUrl(key, current),
     expiresAt: null,
-    size: fs.statSync(file).size,
+    size,
     contentType: contentTypeOfKey(file),
     filename: path.basename(file),
   };
+  try {
+    // key 由内容决定，同一个文件永远算出同一个 key：对象已经在了就直接复用，不再传一遍。
+    if (await objectExists(client, current.bucket, key)) return { ...view, reusedRemote: true };
+    await client.putObjectFromFile({ bucket: current.bucket, key, filePath: file, contentType: view.contentType, acl: 'public-read' });
+  } catch (err) {
+    throw mapTosError(err, purpose === 'reference' ? '上传参考视频' : '发布素材');
+  }
+  return view;
 }
 
 // 复用缓存之前检查对象是否还在；返回最新的公网地址（自定义域名改了也能跟着更新）。
+// 返回值：对象在 → 最新的记录；对象确实没了 → null（调用方会重传）；
+// 其他错误（超时、5xx、权限）直接抛出，让调用方复用旧链接或报错，而不是重传整份文件。
 export async function validateTosPublication(publication) {
   const { current, client } = await checkedClient();
-  const key = assertObjectKey(publication.key, current.prefix);
+  const key = String(publication?.key || '');
+  // 前缀改过、或者记录里的 key 不在当前前缀内：这条记录已经用不了，交给调用方重新上传。
+  if (!keyInPrefix(key, current.prefix)) return null;
   try {
     const result = await client.headObject({ bucket: current.bucket, key });
     if (result?.statusCode !== 200) return null;
     return { ...publication, url: publicObjectUrl(key, current), checkedAt: Date.now() };
   } catch (err) {
-    const mapped = mapTosError(err, '检查 TOS 对象');
-    if (mapped.status === 404) return null;
-    throw mapped;
+    if (objectMissing(err)) return null;
+    throw mapTosError(err, '检查 TOS 对象');
   }
 }
 

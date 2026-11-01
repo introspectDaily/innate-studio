@@ -32,18 +32,21 @@ function fileInfo(space, localUrl) {
   return { file, ext, kind, size: fs.statSync(file).size, contentType: MIME_BY_EXT[ext] || 'application/octet-stream', filename: path.basename(file) };
 }
 
-async function validatePublication(space, record, purpose) {
+async function validatePublication(space, record) {
   if (!record || expired(record)) return null;
   if (record.provider !== 'tos') return null;
+  let checked;
   try {
-    const checked = await validateTosPublication(record);
-    if (!checked) return null;
-    const next = { ...record, ...checked, valid: true };
-    savePublication(space, next);
-    return next;
-  } catch {
-    return null;
+    checked = await validateTosPublication(record);
+  } catch (err) {
+    // 「对象确实没了」（404）在 validateTosPublication 里已经变成 null，这里是超时、5xx、权限之类的临时故障。
+    // 这种情况下重传也一定失败，还会白传几百 MB：先沿用已有的稳定链接，把原因带回给调用方（不落盘，抖动时不反复写文件）。
+    return { ...record, valid: false, stale: true, checkError: message(err) };
   }
+  if (!checked) return null;
+  const next = { ...record, ...checked, valid: true };
+  savePublication(space, next);
+  return next;
 }
 
 async function cachedFor(space, localUrl, purpose) {
@@ -51,25 +54,16 @@ async function cachedFor(space, localUrl, purpose) {
     .filter((item) => item.localUrl === localUrl && item.provider === 'tos' && (purpose === 'share' || item.direct))
     .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   for (const candidate of candidates) {
-    const checked = await validatePublication(space, candidate, purpose);
+    const checked = await validatePublication(space, candidate);
     if (checked) return { ...checked, reused: true };
   }
   return null;
 }
 
-// 发布一份本地素材。purpose:
-// - share：供人下载/预览；
-// - reference：模型要直接读取文件（Ark 参考视频）。
-// 两种用途都走 TOS：它给出稳定、可被模型直接读取的对象地址。
-export async function publishLocalMedia(space, localUrl, { purpose = 'share' } = {}) {
-  if (!String(localUrl || '').startsWith('/media/')) throw new HttpError(400, 'invalid_request', '只能发布本机素材');
-  const info = fileInfo(space, localUrl);
-  if (purpose === 'reference' && info.kind !== 'video') throw new HttpError(400, 'invalid_request', '只有视频需要公网参考链接');
+// 同一个文件正在发布时，后来的请求等同一份结果：不然同时点两次生成，会把同一段视频传两遍。
+const inFlight = new Map();
 
-  if (!tosConfigured()) {
-    throw new HttpError(409, 'public_storage_not_configured', '需要公网链接，但尚未配置 TOS。请先在「管理」中配置火山引擎 TOS。');
-  }
-
+async function publishOnce(space, localUrl, purpose) {
   const cached = await cachedFor(space, localUrl, purpose);
   if (cached) return cached;
 
@@ -96,6 +90,27 @@ export async function publishLocalMedia(space, localUrl, { purpose = 'share' } =
   };
   savePublication(space, record);
   return record;
+}
+
+// 发布一份本地素材。purpose:
+// - share：供人下载/预览；
+// - reference：模型要直接读取文件（Ark 参考视频）。
+// 两种用途都走 TOS：它给出稳定、可被模型直接读取的对象地址。
+export async function publishLocalMedia(space, localUrl, { purpose = 'share' } = {}) {
+  if (!String(localUrl || '').startsWith('/media/')) throw new HttpError(400, 'invalid_request', '只能发布本机素材');
+  const info = fileInfo(space, localUrl);
+  if (purpose === 'reference' && info.kind !== 'video') throw new HttpError(400, 'invalid_request', '只有视频需要公网参考链接');
+
+  if (!tosConfigured()) {
+    throw new HttpError(409, 'public_storage_not_configured', '需要公网链接，但尚未配置 TOS。请先在「管理」中配置火山引擎 TOS。');
+  }
+
+  const flightKey = `${localUrl}|${purpose}`;
+  const pending = inFlight.get(flightKey);
+  if (pending) return pending;
+  const task = publishOnce(space, localUrl, purpose).finally(() => inFlight.delete(flightKey));
+  inFlight.set(flightKey, task);
+  return task;
 }
 
 export async function withPublicVideos(space, payload) {
