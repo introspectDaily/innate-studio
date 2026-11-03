@@ -134,14 +134,14 @@ route('POST', /^\/api\/runninghub\/submit$/, async ({ req, space, user }) => {
   const videoDuration = await videoDurationOf(space, raw?.[rhVideoKey(0)]);
   if (videoDuration > 0) meta.videoDuration = videoDuration;
 
-  const { inputs, problems, nodeInfoList, machine, uploads } = rhPlan(workflow, raw || {}, meta);
+  const { inputs, problems, warnings, nodeInfoList, machine, uploads } = rhPlan(workflow, raw || {}, meta);
   if (problems.length) throw new HttpError(400, 'invalid_request', problems[0], { problems });
 
   // 记录上的提示词、估价、以及提交时的定义快照（之后复现这条记录用）。
   const prompt = String(inputs.prompt || '').trim();
   const estimate = rhCost(workflow.key, inputs);
   const snapshot = { uuid: rhUuid(workflow.key), name: workflow.name, kind: workflow.kind, inputs, rules: rhRules(workflow), provider: RH_PROVIDER };
-  const draft = { provider: RH_PROVIDER, kind: workflow.kind, model: workflow.name, prompt, payload: inputs, rh: { key: workflow.key, machine, estimate }, workflow: snapshot };
+  const draft = { provider: RH_PROVIDER, kind: workflow.kind, model: workflow.name, prompt, payload: inputs, rh: { key: workflow.key, machine, estimate, warnings }, workflow: snapshot };
   holdCredits(user, [draft]);
 
   let lease = null;

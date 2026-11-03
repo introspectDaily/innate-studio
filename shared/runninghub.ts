@@ -464,6 +464,8 @@ export interface RhPlan {
   // 校验过、补好默认值的入参（记录里存的就是它）。
   inputs: Record<string, unknown>;
   problems: string[];
+  // 不拦截的提醒（比如显存可能溢出）：用户可以照常提交，记录里保留这句话。
+  warnings: string[];
   // 真正发给 RunningHub 的 nodeInfoList。
   nodeInfoList: { nodeId: string; fieldName: string; fieldValue: string | number | boolean }[];
   // 提交时作为 instanceType 的那一档。
@@ -608,9 +610,9 @@ export function rhPlan(workflow: RhWorkflow, raw: Record<string, unknown> = {}, 
   const machine = rhMachineOf(workflow, inputs);
   // 显存防呆放最后：机器档位和入参都齐了才能算。拦下来的是「必爆的组合」，照着提示调就行。
   const vram = rhVramProblem(workflow, inputs, machine);
-  if (vram) problems.push(vram);
+  const warnings = vram ? [vram] : [];
   // 机器档位不进 nodeInfoList（它是提交参数），但留在 inputs 里：记录要还原用户当时选的档位。
-  return { inputs, problems, nodeInfoList, machine, uploads };
+  return { inputs, problems, warnings, nodeInfoList, machine, uploads };
 }
 
 // ---------- 价格 ----------

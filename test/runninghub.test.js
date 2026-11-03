@@ -216,32 +216,34 @@ test('输出时长换算成帧数：按工作流的固定帧率（24）向上取
   assert.equal(plan.inputs.video_seconds, 6.5);
 });
 
-test('输出时长的默认值与原视频一致：没填时按量到的时长换算，超长夹到滑块上限', () => {
+test('输出时长的默认值与原视频一致：没填时按量到的时长换算，超过滑块上限 13 秒的截掉', () => {
   const value = (plan) => plan.nodeInfoList.find((item) => item.nodeId === '286' && item.fieldName === 'frame_load_cap')?.fieldValue;
-  // 13.2 秒的原视频：按 0.1 秒向上取整还是 13.2（不硬凑整秒）× 24fps = 316.8 → 317 帧，完整覆盖源片。
-  const plan = rhPlan(SWAP, { ref_image_0: 'a', ref_image_1: 'b', ref_video_0: 'v', prompt: 'x' }, { videoDuration: 13.2 });
-  assert.equal(value(plan), 317);
-  assert.equal(plan.inputs.video_seconds, 13.2);
-  // 13.04 秒：向上取整到 0.1 秒是 13.1（宁可多一帧也不丢结尾）。
-  const odd = rhPlan(SWAP, { ref_image_0: 'a', ref_image_1: 'b', ref_video_0: 'v', prompt: 'x' }, { videoDuration: 13.04 });
-  assert.equal(value(odd), 315); // 13.1 × 24 = 314.4 → 315
-  assert.equal(odd.inputs.video_seconds, 13.1);
-  // 45 秒的长片：夹到滑块上限 30 秒（720 帧），超出部分截掉。
+  // 8.2 秒的原视频：按 0.1 秒向上取整是 8.2 × 24fps = 196.8 → 197 帧，完整覆盖源片。
+  const plan = rhPlan(SWAP, { ref_image_0: 'a', ref_image_1: 'b', ref_video_0: 'v', prompt: 'x' }, { videoDuration: 8.2 });
+  assert.equal(value(plan), 197);
+  assert.equal(plan.inputs.video_seconds, 8.2);
+  // 8.04 秒：向上取整到 0.1 秒是 8.1（宁可多一帧也不丢结尾）。
+  const odd = rhPlan(SWAP, { ref_image_0: 'a', ref_image_1: 'b', ref_video_0: 'v', prompt: 'x' }, { videoDuration: 8.04 });
+  assert.equal(value(odd), 195); // 8.1 × 24 = 194.4 → 195
+  assert.equal(odd.inputs.video_seconds, 8.1);
+  // 45 秒的长片：夹到滑块上限 13 秒（312 帧），超出部分截掉。
   const long = rhPlan(SWAP, { ref_image_0: 'a', ref_image_1: 'b', ref_video_0: 'v', prompt: 'x' }, { videoDuration: 45 });
-  assert.equal(value(long), 720);
+  assert.equal(value(long), 312);
   // 量不到时长（没有 ffmpeg / 远程链接）：落回登记表的默认值 5 秒。
   const fallback = rhPlan(SWAP, { ref_image_0: 'a', ref_image_1: 'b', ref_video_0: 'v', prompt: 'x' });
   assert.equal(value(fallback), 120);
 });
 
-test('显存防呆：帧数 × 二采分辨率超了机器预算就拦下，提示怎么调', () => {
+test('显存防呆：帧数 × 二采分辨率超了机器预算只提醒不拦截，提示怎么调', () => {
   // 真实事故：13 秒源片 312 帧 × 1.0MP 在标准 24G 上 RuntimeError: VRAM grow failed（白扣一次钱）。
   const value = (plan) => plan.nodeInfoList.find((item) => item.nodeId === '286' && item.fieldName === 'frame_load_cap')?.fieldValue;
   const plan = rhPlan(SWAP, { ref_image_0: 'a', ref_image_1: 'b', ref_video_0: 'v', prompt: 'x', video_seconds: 13 });
   assert.equal(value(plan), 312);
-  assert.ok(plan.problems.some((problem) => problem.includes('显存溢出') && problem.includes('312 帧')), plan.problems.join('；'));
+  // 超预算只是提醒，不拦截：problems 为空，允许照常提交。
+  assert.deepEqual(plan.problems, []);
+  assert.ok(plan.warnings.some((warning) => warning.includes('显存溢出') && warning.includes('312 帧')), plan.warnings.join('；'));
   // 提示要能照着调：给出降时长、降分辨率、换机器三条路。
-  assert.ok(plan.problems[0].includes('加强 48G'));
+  assert.ok(plan.warnings[0].includes('加强 48G'));
   // 同样的参数换 48G 机器就放行。
   const plus = rhPlan(SWAP, { ref_image_0: 'a', ref_image_1: 'b', ref_video_0: 'v', prompt: 'x', video_seconds: 13, machine: '加强 48G' });
   assert.deepEqual(plus.problems, []);
@@ -250,7 +252,7 @@ test('显存防呆：帧数 × 二采分辨率超了机器预算就拦下，提�
   assert.deepEqual(fit.problems, []);
   // 省显存档把二采压到 0.5MP，13 秒也能过预算（312 × 0.5 = 156）……不，超 120，同样要拦。
   const safe = rhPlan(SWAP, { ref_image_0: 'a', ref_image_1: 'b', ref_video_0: 'v', prompt: 'x', video_seconds: 13, upscale_megapixels: 0.5 });
-  assert.ok(safe.problems.some((problem) => problem.includes('显存溢出')));
+  assert.ok(safe.warnings.some((warning) => warning.includes('显存溢出')));
 });
 
 test('画质档：一选就把一整套推荐值套上去', () => {
