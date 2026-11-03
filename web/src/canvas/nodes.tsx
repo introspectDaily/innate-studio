@@ -20,7 +20,7 @@ import { openMenu, openModal, openPopover, toast } from '../ui/layers.tsx';
 import { VideoPlayer, AudioPlayer } from '../player.tsx';
 import { openDetail } from '../history.tsx';
 import type { Kind, Ref } from '../types.ts';
-import { BOX_HEIGHT, IMAGE_PRESETS, NODE_LABELS, OUTPAINT_PROMPT, ROLE_LABELS, canLink, keepBefore, keptOf, makeRoom, nodeWidth, linkLabel, PINS, PIN_LABELS, type AudioData, type FrameRole, type Generated, type GroupData, type ImageData, type Pin, type Preset, type StackData, type LinkData, type NodeKind, type TextData, type VideoData, miniMaxRefs, replaceMiniMaxRefs, type MiniMaxRef } from './model.ts';
+import { BOX_HEIGHT, IMAGE_PRESETS, NODE_LABELS, OUTPAINT_PROMPT, ROLE_LABELS, canLink, keepBefore, keptOf, makeRoom, nodeWidth, linkLabel, PINS, PIN_LABELS, type AudioData, type FrameRole, type Generated, type GroupData, type ImageData, type Pin, type Preset, type StackData, type LinkData, type NodeKind, type TextData, type VideoData, miniMaxObjects, replaceMiniMaxRefs } from './model.ts';
 import { fitVideo, generate, isFilled, nameOf, outputOf, probeVideoDuration, recordOf, runAll, sourceDurationOf } from './run.ts';
 import { openKept } from './kept.tsx';
 import { Cropper, cropImage, grabFrame, padImage, splitGrid, type Made } from './edit.tsx';
@@ -238,26 +238,29 @@ function Prompt({ id, value, placeholder, presets }: { id: string; value: string
   const { set, ...draft } = useDraft(value, (prompt) => flow.updateNodeData(id, { prompt }));
 
   // MiniMax 写法（<Picture 1>）的映射：只有这个节点选的工作流认 @ 写法（海螺 H3）时才提供。
-  // 每一处挑一个同类型的上游节点换进去；没挑的保留原样，允许只换一部分。
+  // 按「对象」列：同一个 <Picture 1> 写了几次，也只有一行，挑一次全部换掉。没挑的保留原样，允许只换一部分。
   const model = String((flow.getNode(id)?.data as AnyData | undefined)?.model || '');
   const canMap = Boolean(flowSummary(model)?.mentions);
-  const refs = useMemo(() => miniMaxRefs(draft.value), [draft.value]);
+  const objects = useMemo(() => miniMaxObjects(draft.value), [draft.value]);
   const [mapOpen, setMapOpen] = useState(false);
-  const [picks, setPicks] = useState<string[]>([]);
-  const candidatesOf = (ref: MiniMaxRef) => inputs.filter((inp) => inp.link.kind === ref.kind).sort((a, b) => (Number((a.node.data as AnyData).no) || 0) - (Number((b.node.data as AnyData).no) || 0));
+  const [picks, setPicks] = useState<Record<string, string>>({});
+  const candidatesOf = (kind: NodeKind) => inputs.filter((inp) => inp.link.kind === kind).sort((a, b) => (Number((a.node.data as AnyData).no) || 0) - (Number((b.node.data as AnyData).no) || 0));
   // 打开时先按序号给一个默认：Picture 3 → 同类型里排第 3 个节点，用户可以改。
   function openMap() {
-    setPicks(refs.map((ref) => {
-      const hit = candidatesOf(ref)[ref.no - 1];
-      return hit ? `@${nameOf(hit.node)}` : '';
-    }));
+    const next: Record<string, string> = {};
+    for (const obj of objects) {
+      const hit = candidatesOf(obj.kind)[obj.no - 1];
+      if (hit) next[obj.key] = `@${nameOf(hit.node)}`;
+    }
+    setPicks(next);
     setMapOpen(true);
   }
-  // 文字变了，原来的挑选对不上号了，收起来重新来。
-  useEffect(() => setMapOpen(false), [refs.length]);
-  const chosen = refs.reduce((n, _, i) => n + (picks[i] ? 1 : 0), 0);
+  // 文字里的对象变了（增减了写法），原来的挑选对不上号了，收起来重新来。
+  const objectKeys = objects.map((o) => o.key).join('|');
+  useEffect(() => setMapOpen(false), [objectKeys]);
+  const chosen = objects.filter((obj) => picks[obj.key]).length;
   function applyMap() {
-    set(replaceMiniMaxRefs(draft.value, refs, refs.map((_, i) => picks[i] || null)));
+    set(replaceMiniMaxRefs(draft.value, picks));
     setMapOpen(false);
   }
 
@@ -393,37 +396,37 @@ function Prompt({ id, value, placeholder, presets }: { id: string; value: string
         onScroll={(e) => mirror.current && (mirror.current.scrollTop = e.currentTarget.scrollTop)}
       />
       </div>
-      {canMap && refs.length > 0 && (
+      {canMap && objects.length > 0 && (
         <div className="cnode-refmap nodrag nowheel">
           {!mapOpen ? (
             <button type="button" className="cnode-refmap-open" onClick={openMap}>
-              提示词里有 {refs.map((ref) => ref.token).join('、')}，换成节点引用…
+              提示词里有 {objects.map((obj) => obj.token).join('、')}，换成节点引用…
             </button>
           ) : (
             <>
-              <p className="cnode-refmap-note">每一处换成哪个上游节点。没挑的保留原样，可以只换一部分。</p>
-              {refs.map((ref, i) => {
-                const candidates = candidatesOf(ref);
+              <p className="cnode-refmap-note">每个对象换成哪个上游节点，同一个对象的所有写法一起换。没挑的保留原样，可以只换一部分。</p>
+              {objects.map((obj) => {
+                const candidates = candidatesOf(obj.kind);
                 return (
-                  <div className="cnode-refmap-row" key={`${ref.start}-${ref.token}`}>
-                    <code>{ref.token}</code>
+                  <div className="cnode-refmap-row" key={obj.key}>
+                    <code>{obj.token}</code>
                     <span className="cnode-refmap-arrow" aria-hidden="true">→</span>
                     <Dropdown
-                      label={`替换 ${ref.token}`}
-                      value={picks[i] ?? ''}
+                      label={`替换 ${obj.token}`}
+                      value={picks[obj.key] ?? ''}
                       options={[
                         { value: '', label: '保留原样' },
                         ...candidates.map((c) => ({ value: `@${nameOf(c.node)}`, label: `@${nameOf(c.node)}` })),
                       ]}
-                      onChange={(next) => setPicks((prev) => prev.map((p, j) => (j === i ? next : p)))}
+                      onChange={(next) => setPicks((prev) => ({ ...prev, [obj.key]: next }))}
                     />
-                    {!candidates.length && <span className="muted">没连入{ref.kind === 'image' ? '图片' : ref.kind === 'video' ? '视频' : '音频'}节点</span>}
+                    {!candidates.length && <span className="muted">没连入{obj.kind === 'image' ? '图片' : obj.kind === 'video' ? '视频' : '音频'}节点</span>}
                   </div>
                 );
               })}
               <div className="cnode-refmap-foot">
                 <button type="button" className="btn btn-sm" onClick={() => setMapOpen(false)}>取消</button>
-                <button type="button" className="btn btn-sm btn-primary" disabled={!chosen} onClick={applyMap}>替换 {chosen} 处</button>
+                <button type="button" className="btn btn-sm btn-primary" disabled={!chosen} onClick={applyMap}>替换 {chosen} 个对象</button>
               </div>
             </>
           )}

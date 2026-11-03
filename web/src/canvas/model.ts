@@ -205,30 +205,42 @@ export function resolveMentions(prompt: string, inputs: Mentionable[], labels?: 
 // 不是画布上的节点，所以要用户自己挑：每一处换成哪个上游节点（换成 @图片 2 这种写法）。
 export const MINIMAX_REF = /<\s*(Picture|Video|Audio)\s*(\d+)\s*>/gi;
 const MINIMAX_KIND: Record<string, NodeKind> = { picture: 'image', video: 'video', audio: 'audio' };
+// 同一个对象的写法：<Picture 1> 和 <picture 1> 是同一个素材，按类型加序号认。
+export const miniMaxKey = (kind: NodeKind, no: number) => `${kind}:${no}`;
 export interface MiniMaxRef {
   token: string;
   kind: NodeKind;
   no: number;
+  key: string;
   start: number;
   end: number;
 }
+// 提示词里每一处写法（出现几次列几条）。
 export function miniMaxRefs(prompt: string): MiniMaxRef[] {
   const found: MiniMaxRef[] = [];
   for (const m of prompt.matchAll(MINIMAX_REF)) {
-    found.push({ token: m[0], kind: MINIMAX_KIND[m[1].toLowerCase()], no: Number(m[2]), start: m.index!, end: m.index! + m[0].length });
+    const kind = MINIMAX_KIND[m[1].toLowerCase()];
+    const no = Number(m[2]);
+    found.push({ token: m[0], kind, no, key: miniMaxKey(kind, no), start: m.index!, end: m.index! + m[0].length });
   }
   return found;
 }
-// picks 和 refs 一一对应：给了 @ 写法的那几处换掉，没给（null / 空）的原样留着。允许只换一部分。
-export function replaceMiniMaxRefs(prompt: string, refs: MiniMaxRef[], picks: (string | null | undefined)[]): string {
+// 提示词里有几个不同的对象（按第一次出现的顺序去重）。映射按这个列，不按出现次数。
+export function miniMaxObjects(prompt: string): { key: string; token: string; kind: NodeKind; no: number }[] {
+  const seen = new Map<string, { key: string; token: string; kind: NodeKind; no: number }>();
+  for (const ref of miniMaxRefs(prompt)) if (!seen.has(ref.key)) seen.set(ref.key, { key: ref.key, token: ref.token, kind: ref.kind, no: ref.no });
+  return [...seen.values()];
+}
+// picks：按对象的 key 给 @ 写法。同一个对象的每一处都换成同一个；没给的对象原样留着，允许只换一部分。
+export function replaceMiniMaxRefs(prompt: string, picks: Record<string, string | null | undefined>): string {
   let out = '';
   let last = 0;
-  refs.forEach((ref, i) => {
-    const pick = picks[i];
-    if (!pick) return;
+  for (const ref of miniMaxRefs(prompt)) {
+    const pick = picks[ref.key];
+    if (!pick) continue;
     out += prompt.slice(last, ref.start) + pick;
     last = ref.end;
-  });
+  }
   return out + prompt.slice(last);
 }
 

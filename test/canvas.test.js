@@ -2,7 +2,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { alignNodes, canLink, contentOf, distributeNodes, keepBefore, keptOf, KEPT_LIMIT, targetsOf, sourcesOf, linkLabel, joinPrompt, videoFormFrom, stripNodeData, nodeWidth, clipOf, pasteClip, snapTo, tidy, placeResults, groupFrame, runOrder, resolveMentions, makeRoom, miniMaxRefs, replaceMiniMaxRefs } from '../web/src/canvas/model.ts';
+import { alignNodes, canLink, contentOf, distributeNodes, keepBefore, keptOf, KEPT_LIMIT, targetsOf, sourcesOf, linkLabel, joinPrompt, videoFormFrom, stripNodeData, nodeWidth, clipOf, pasteClip, snapTo, tidy, placeResults, groupFrame, runOrder, resolveMentions, makeRoom, miniMaxRefs, miniMaxObjects, replaceMiniMaxRefs } from '../web/src/canvas/model.ts';
 import { buildVideoRequest } from '../web/src/request.ts';
 
 const base = {
@@ -332,13 +332,17 @@ test('MiniMax 写法：找出 <Picture/Video/Audio N>，大小写和空格都认
   assert.deepEqual(refs.map((r) => [r.token, r.kind, r.no]), [['<Picture 1>', 'image', 1], ['<picture2>', 'image', 2], ['<Video 1>', 'video', 1], ['<Audio 1>', 'audio', 1]]);
 });
 
-test('MiniMax 写法：只换挑了的，没挑的原样留着（允许只换一部分）', () => {
-  const prompt = '让 <Picture 1> 走进 <Picture 2>，动作参考<Video 1>，配音 <Audio 1>';
-  const refs = miniMaxRefs(prompt);
-  // 三处挑了两处：Picture 2 和 Video 1 换，其余原样。
-  assert.equal(replaceMiniMaxRefs(prompt, refs, [null, '@图片 2', '@视频 1', null]), '让 <Picture 1> 走进 @图片 2，动作参考@视频 1，配音 <Audio 1>');
-  // 全部没挑：原样返回。
-  assert.equal(replaceMiniMaxRefs(prompt, refs, []), prompt);
-  // 全挑：全换。
-  assert.equal(replaceMiniMaxRefs(prompt, refs, ['@图片 1', '@图片 2', '@视频 1', '@音频 1']), '让 @图片 1 走进 @图片 2，动作参考@视频 1，配音 @音频 1');
+test('MiniMax 写法：同一个对象写几次，只算一个对象（按对象映射，不按次数）', () => {
+  const prompt = '<Picture 1> 走进街道，<picture 1> 回头，<Picture 2> 站住，动作参考<Video 1>，又是 <Picture 1>';
+  assert.deepEqual(miniMaxObjects(prompt).map((o) => [o.key, o.token]), [['image:1', '<Picture 1>'], ['image:2', '<Picture 2>'], ['video:1', '<Video 1>']]);
+});
+
+test('MiniMax 写法：挑了的对象，每一处都换成同一个；没挑的原样留着', () => {
+  const prompt = '让 <Picture 1> 走进 <Picture 2>，<picture 1> 回头，动作参考<Video 1>，配音 <Audio 1>';
+  // 只挑 Picture 1 和 Video 1：两处 Picture 1 都换，Picture 2 和 Audio 1 原样。
+  assert.equal(replaceMiniMaxRefs(prompt, { 'image:1': '@图片 2', 'video:1': '@视频 1' }), '让 @图片 2 走进 <Picture 2>，@图片 2 回头，动作参考@视频 1，配音 <Audio 1>');
+  // 没挑：原样返回。
+  assert.equal(replaceMiniMaxRefs(prompt, {}), prompt);
+  // 全挑。
+  assert.equal(replaceMiniMaxRefs(prompt, { 'image:1': '@图片 1', 'image:2': '@图片 2', 'video:1': '@视频 1', 'audio:1': '@音频 1' }), '让 @图片 1 走进 @图片 2，@图片 1 回头，动作参考@视频 1，配音 @音频 1');
 });
