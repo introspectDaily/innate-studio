@@ -199,6 +199,39 @@ export function resolveMentions(prompt: string, inputs: Mentionable[], labels?: 
   return { prompt: resolved, inlined };
 }
 
+// ---------- MiniMax 原生写法的引用 ----------
+
+// 从别处（或者以前的提示词）拷过来的 <Picture 1> <Video 2> <Audio 1> 写法。它们指的是「这次请求里第几个素材」，
+// 不是画布上的节点，所以要用户自己挑：每一处换成哪个上游节点（换成 @图片 2 这种写法）。
+export const MINIMAX_REF = /<\s*(Picture|Video|Audio)\s*(\d+)\s*>/gi;
+const MINIMAX_KIND: Record<string, NodeKind> = { picture: 'image', video: 'video', audio: 'audio' };
+export interface MiniMaxRef {
+  token: string;
+  kind: NodeKind;
+  no: number;
+  start: number;
+  end: number;
+}
+export function miniMaxRefs(prompt: string): MiniMaxRef[] {
+  const found: MiniMaxRef[] = [];
+  for (const m of prompt.matchAll(MINIMAX_REF)) {
+    found.push({ token: m[0], kind: MINIMAX_KIND[m[1].toLowerCase()], no: Number(m[2]), start: m.index!, end: m.index! + m[0].length });
+  }
+  return found;
+}
+// picks 和 refs 一一对应：给了 @ 写法的那几处换掉，没给（null / 空）的原样留着。允许只换一部分。
+export function replaceMiniMaxRefs(prompt: string, refs: MiniMaxRef[], picks: (string | null | undefined)[]): string {
+  let out = '';
+  let last = 0;
+  refs.forEach((ref, i) => {
+    const pick = picks[i];
+    if (!pick) return;
+    out += prompt.slice(last, ref.start) + pick;
+    last = ref.end;
+  });
+  return out + prompt.slice(last);
+}
+
 // ---------- 斜杠预设 ----------
 
 // 图片节点的提示词里打一个 /，列出这些现成的任务：选一个就用它的提示词直接生成，不用自己写。

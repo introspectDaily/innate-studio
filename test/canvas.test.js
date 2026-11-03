@@ -2,7 +2,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { alignNodes, canLink, contentOf, distributeNodes, keepBefore, keptOf, KEPT_LIMIT, targetsOf, sourcesOf, linkLabel, joinPrompt, videoFormFrom, stripNodeData, nodeWidth, clipOf, pasteClip, snapTo, tidy, placeResults, groupFrame, runOrder, resolveMentions, makeRoom } from '../web/src/canvas/model.ts';
+import { alignNodes, canLink, contentOf, distributeNodes, keepBefore, keptOf, KEPT_LIMIT, targetsOf, sourcesOf, linkLabel, joinPrompt, videoFormFrom, stripNodeData, nodeWidth, clipOf, pasteClip, snapTo, tidy, placeResults, groupFrame, runOrder, resolveMentions, makeRoom, miniMaxRefs, replaceMiniMaxRefs } from '../web/src/canvas/model.ts';
 import { buildVideoRequest } from '../web/src/request.ts';
 
 const base = {
@@ -325,4 +325,20 @@ test('复制、存成工作流：不带节点自己的历史版本', () => {
   const clip = clipOf([{ id: 'a', type: 'image', position: { x: 0, y: 0 }, data: { recordId: 'r2', kept: [{ recordId: 'r1', at: 1 }] } }], []);
   assert.equal(clip.nodes[0].data.recordId, 'r2');
   assert.equal('kept' in clip.nodes[0].data, false);
+});
+
+test('MiniMax 写法：找出 <Picture/Video/Audio N>，大小写和空格都认', () => {
+  const refs = miniMaxRefs('让 <Picture 1> 走进 <picture2>，动作参考<Video 1>，配音 <Audio 1>。别管 <Text 1>');
+  assert.deepEqual(refs.map((r) => [r.token, r.kind, r.no]), [['<Picture 1>', 'image', 1], ['<picture2>', 'image', 2], ['<Video 1>', 'video', 1], ['<Audio 1>', 'audio', 1]]);
+});
+
+test('MiniMax 写法：只换挑了的，没挑的原样留着（允许只换一部分）', () => {
+  const prompt = '让 <Picture 1> 走进 <Picture 2>，动作参考<Video 1>，配音 <Audio 1>';
+  const refs = miniMaxRefs(prompt);
+  // 三处挑了两处：Picture 2 和 Video 1 换，其余原样。
+  assert.equal(replaceMiniMaxRefs(prompt, refs, [null, '@图片 2', '@视频 1', null]), '让 <Picture 1> 走进 @图片 2，动作参考@视频 1，配音 <Audio 1>');
+  // 全部没挑：原样返回。
+  assert.equal(replaceMiniMaxRefs(prompt, refs, []), prompt);
+  // 全挑：全换。
+  assert.equal(replaceMiniMaxRefs(prompt, refs, ['@图片 1', '@图片 2', '@视频 1', '@音频 1']), '让 @图片 1 走进 @图片 2，动作参考@视频 1，配音 @音频 1');
 });
