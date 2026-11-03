@@ -188,7 +188,7 @@ const HAILUO_PARAMS: RhParam[] = [
   // 实测：14.9 秒 × 1344×768 在标准 24G 上直接 torch.OutOfMemoryError（死在二采的采样器上），
   // 而作者自己跑的样例是 125 帧（约 5.2 秒）。这里把时长做成秒数滑块，默认与原视频一致——
   // 用户没动过时服务端先量一下原视频多长（探测不到才用这里的 default 兜底），提交前换算成 286.frame_load_cap。
-  { key: 'video_seconds', label: '输出时长（秒）', nodeId: '286', field: 'frame_load_cap', type: 'float', unit: 'seconds', fps: 24, min: 1, max: 30, step: 0.1, default: 5, hint: '默认与原视频一致（精确到 0.1 秒）。时长和显存绑死：标准 24G 建议 ≤ 5 秒，想跑长片要降成片分辨率或换 48G 机器' },
+  { key: 'video_seconds', label: '输出时长（秒）', nodeId: '286', field: 'frame_load_cap', type: 'float', unit: 'seconds', fps: 24, min: 1, max: 13, step: 0.1, default: 5, hint: '默认与原视频一致（精确到 0.1 秒）。时长和显存绑死：标准 24G 建议 ≤ 5 秒，想跑长片要降成片分辨率或换 48G 机器' },
   // 二采（节点 247）决定成片的输出尺寸：1 百万像素 ≈ 1344×768，是显存的大头。
   { key: 'upscale_megapixels', label: '二采分辨率（百万像素）', nodeId: '247', field: 'value', type: 'float', min: 0.3, max: 2, default: 1, hint: '第二遍采样（成片）的分辨率：1 ≈ 1344×768，0.5 ≈ 960×544。显存不够就往下降' },
   // 一采的结果（节点 271）默认只放在临时目录，平台不返回。打开它，一次采样的片段也会一起回到我们这边。

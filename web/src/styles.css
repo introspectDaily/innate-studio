@@ -1,6 +1,7 @@
 /* 视觉规范见项目根目录的 DESIGN.md。颜色、尺寸、圆角、阴影只从这里的变量取值。 */
 
-/* 深色是默认主题；浅色通过 <html data-theme="light"> 切换。两套只有变量不同，组件样式共用。
+/* 深色是默认主题。浅色、强光（高对比）、暖色通过 <html data-theme> 切换：light、sunlight、warm。
+   它们都是浅底，共用 light 的变量，sunlight 和 warm 只改要改的几个。组件样式共用。
    底色、边线、文字的灰度取自 Antigravity 的界面截图，改动前先看 DESIGN.md 第 2 节。 */
 :root {
   color-scheme: dark;
@@ -95,7 +96,7 @@
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 
-:root[data-theme='light'] {
+:root:is([data-theme='light'], [data-theme='sunlight'], [data-theme='warm']) {
   color-scheme: light;
   --bg: #f9f9f9;
   --bg-side: rgba(0, 0, 0, 0.024);
@@ -133,9 +134,66 @@
   --shadow-tile: 0 2px 6px -1px rgba(0, 0, 0, 0.14);
 }
 
+/* 强光：户外、阳光直射下用。纯白底、纯黑字，边线和分隔加深到看得见，少用灰底。 */
+:root[data-theme='sunlight'] {
+  --bg: #ffffff;
+  --bg-side: #f1f1f1;
+  --surface-1: #ffffff;
+  --surface-2: #e4e4e4;
+  --surface-3: #d2d2d2;
+  --surface-float: #ffffff;
+  --lip: #e4e4e4;
+  --nav-active: rgba(0, 0, 0, 0.12);
+  --hover: rgba(0, 0, 0, 0.1);
+  --hover-strong: rgba(0, 0, 0, 0.18);
+  --seg-thumb: #ffffff;
+  --border: rgba(0, 0, 0, 0.22);
+  --border-float: rgba(0, 0, 0, 0.3);
+  --border-strong: rgba(0, 0, 0, 0.45);
+  --border-hover: #000000;
+  --text: #000000;
+  --text-2: #111111;
+  --text-3: #2b2b2b;
+  --text-4: #3a3a3a;
+  --text-off: #4d4d4d;
+  --accent: #0a3fb8;
+  --mark: #4524c9;
+  --ok: #05603a;
+  --warn: #7d4c00;
+  --danger: #b3211b;
+  --overlay: rgba(0, 0, 0, 0.45);
+  --scroll: rgba(0, 0, 0, 0.3);
+  --scroll-hover: rgba(0, 0, 0, 0.5);
+  --switch-track: #b5b5b5;
+  --shadow-float: 0 4px 12px rgba(0, 0, 0, 0.18);
+  --shadow-lift: 0 16px 32px -12px rgba(0, 0, 0, 0.25);
+}
+
+/* 暖色：米黄纸色，长时间看着不刺眼。字是深棕黑，不是纯黑。 */
+:root[data-theme='warm'] {
+  --bg: #f5efe1;
+  --bg-side: rgba(90, 60, 20, 0.04);
+  --surface-1: #fbf7ec;
+  --surface-2: #ebe3cf;
+  --surface-3: #e0d6bd;
+  --surface-float: #fbf7ec;
+  --lip: #ebe3cf;
+  --seg-thumb: #fbf7ec;
+  --border: rgba(60, 40, 10, 0.1);
+  --border-float: rgba(60, 40, 10, 0.12);
+  --border-strong: rgba(60, 40, 10, 0.18);
+  --border-hover: rgba(60, 40, 10, 0.3);
+  --text: #2e2a22;
+  --text-2: #524a3c;
+  --text-3: #6d6456;
+  --text-4: #7f7666;
+  --text-off: #8f8572;
+  --text-strong: #1a170f;
+}
+
 /* 浅色下 --surface-2、--surface-3 加深过一档，是给直接垫在页面底图上的块用的（底图带颜色，浅了分不开）。
    白色的卡片、弹窗、浮层里面底色是纯的，用回原来浅的那一档。 */
-:root[data-theme='light'] :is(.popover, .composer-card, .modal, .skill-card, .cnode-box, .cnode-panel, .cfind, .canvas-tools, .canvas-foot, .canvas-batch-bar) {
+:root:is([data-theme='light'], [data-theme='sunlight'], [data-theme='warm']) :is(.popover, .composer-card, .modal, .skill-card, .cnode-box, .cnode-panel, .cfind, .canvas-tools, .canvas-foot, .canvas-batch-bar) {
   --surface-2: #f3f3f3;
   --surface-3: #eaeaea;
 }
@@ -208,10 +266,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .sidebar { display: flex; flex-direction: column; min-height: 0; padding: var(--sp-12) var(--sp-8) var(--sp-8); background: var(--bg-side); }
 .brand { display: flex; align-items: center; gap: var(--sp-8); padding: var(--sp-4) var(--sp-12) var(--sp-16); font-size: var(--text-body); font-weight: var(--fw-semibold); }
 .brand-logo { flex: none; height: 24px; width: auto; color: #fff; }
-:root[data-theme='light'] .brand-logo { color: #2a2a2a; }
+:root:is([data-theme='light'], [data-theme='sunlight'], [data-theme='warm']) .brand-logo { color: #2a2a2a; }
 /* 历史与空画布使用的品牌图标。字标现由 .brand-logo SVG 绘制。 */
 .brand-mark { flex: none; width: 24px; height: 24px; background: url('./brand/mark-on-dark.png') center / contain no-repeat; }
-:root[data-theme='light'] .brand-mark { background-image: url('./brand/mark-on-light.png'); }
+:root:is([data-theme='light'], [data-theme='sunlight'], [data-theme='warm']) .brand-mark { background-image: url('./brand/mark-on-light.png'); }
 .nav { display: flex; flex-direction: column; gap: var(--sp-2); }
 .nav-item {
   display: flex;

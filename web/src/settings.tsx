@@ -4,7 +4,7 @@ import { lazy, Suspense, useState } from 'react';
 import { state, useStore, polishModel, setPolishModel, canvasPlace, setCanvasPlace } from './store.ts';
 import { AccountSection } from './account.tsx';
 import { AgentKeysSection } from './agent-keys.tsx';
-import { themeChoice, setTheme } from './theme.ts';
+import { themeChoice, setTheme, THEME_OPTIONS, type ThemeChoice } from './theme.ts';
 import { Segmented, FormRow, Dropdown } from './ui/controls.tsx';
 import { openModal } from './ui/layers.tsx';
 
@@ -26,17 +26,14 @@ function Settings() {
       <section className="settings-group">
         <h3>通用</h3>
         <div className="settings-card">
-          <FormRow label="主题">
-            <Segmented
-              options={[
-                { value: 'system', label: '跟随系统' },
-                { value: 'light', label: '浅色' },
-                { value: 'dark', label: '深色' },
-              ]}
+          <FormRow label="主题" desc={THEME_OPTIONS.find((t) => t.value === theme)?.desc}>
+            <Dropdown
+              label="主题"
               value={theme}
+              options={THEME_OPTIONS.map((t) => ({ value: t.value, label: t.label }))}
               onChange={(next) => {
-                setTheme(next);
-                setThemeState(next);
+                setTheme(next as ThemeChoice);
+                setThemeState(next as ThemeChoice);
               }}
             />
           </FormRow>

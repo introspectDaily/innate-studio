@@ -17,7 +17,7 @@
       }
       var saved = localStorage.getItem('innate-studio.theme');
       if (saved === 'system') saved = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
-      document.documentElement.dataset.theme = saved === 'light' ? 'light' : 'dark';
+      document.documentElement.dataset.theme = ['light', 'sunlight', 'warm'].indexOf(saved) >= 0 ? saved : 'dark';
     } catch { document.documentElement.dataset.theme = 'dark'; }
   </script>
   <title>Innate Studio</title>
