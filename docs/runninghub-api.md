@@ -381,11 +381,34 @@ POST /task/openapi/ai-app/run
 ```
 `webappId` 是 **integer**，`nodeInfoList` 必填且不能是空数组（实测空数组报 `1101 Node info error`）。
 
-**V2（实测存在）**
+**V2（实测存在，已接入文生图工作流）**
 ```
 POST /openapi/v2/run/ai-app/{appId}
-{ "nodeInfoList": [...] }
+Authorization: Bearer <KEY>
+{
+  "nodeInfoList": [
+    { "nodeId": "7", "fieldName": "width",      "fieldValue": "1080", "description": null },
+    { "nodeId": "7", "fieldName": "height",     "fieldValue": "1920", "description": null },
+    { "nodeId": "6", "fieldName": "seed",       "fieldValue": "527633149753192", "description": null },
+    { "nodeId": "7", "fieldName": "batch_size", "fieldValue": "1",    "description": null },
+    { "nodeId": "5", "fieldName": "text",       "fieldValue": "<提示词>", "description": null }
+  ],
+  "instanceType": "default",
+  "usePersonalQueue": "false"
+}
 ```
+官方示例里**每个 `fieldValue` 都是字符串**（连 `width` / `seed` 也是），并带 `description: null`，
+和 §5.2「类型必须与原字段一致」的写法不同——按平台自己生成的 curl 发最稳。
+`usePersonalQueue` 文档表格写 Boolean，示例 curl 给的是字符串 `"false"`；我们跟示例。
+`retainSeconds` / `webhookUrl` 可选，含义同 §5.4。
+
+提交响应是 V2 扁平结构：`{taskId, status:"RUNNING", errorCode:"", errorMessage:"", results:null, clientId, promptTips}`。
+查询仍走 §4 的 `POST /openapi/v2/query`，成功时 `results:[{url, nodeId, outputType:"png", text:null}]`、
+`usage:{consumeMoney, consumeCoins, taskCostTime, ...}`——**结果 URL 只有 24 小时**，服务端会立刻下载落盘。
+
+> **不要给 AI 应用加 V1 兜底**：V1 的 `webappId` 要求 integer，而实测 appId 是 19 位
+> （如 `2083580194556071937`），超过 `Number.MAX_SAFE_INTEGER`，`Number()` 会丢精度、指到另一个应用上。
+> `server/runninghub.js` 的 `submitWorkflow` 只在 `endpoint: 'workflow'` 时退回 V1。
 
 **取示例参数**（很实用）：
 ```

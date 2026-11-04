@@ -3,8 +3,9 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ruleDefault, requiredMedia, resolutionTier, stepPrice, workflowCost, cleanInputs, formValues, ruleKind, ruleLabel, durationOf, mediaAccepts, flowModelId, flowUuidOf, flowTextKey, flowMediaKeys, flowVideoSpec, isFlowModel, flowInputs } from '../shared/autodl.ts';
+import { ruleDefault, requiredMedia, resolutionTier, stepPrice, workflowCost, cleanInputs, formValues, ruleKind, ruleLabel, durationOf, mediaAccepts, flowModelId, flowUuidOf, flowTextKey, flowMediaKeys, flowVideoSpec, isFlowModel, flowInputs, flowDisplayParams, isLongParam, paramIsLong } from '../shared/autodl.ts';
 import { estimateCost, quoteCost, toCredits } from '../shared/models.ts';
+import { rhRules, rhWorkflow } from '../shared/runninghub.ts';
 
 const MINIMAX = {
   price_type: 'minimax_h3',
@@ -281,4 +282,57 @@ test('画布节点里的其余参数：枚举、开关跟着提交，不认识�
   // 枚举给了不在选项里的 label：拦下来，不提交。
   const bad = flowInputs(MINIMAX.input_rules, { ...base, extra: { mode: '极速模式' } });
   assert.match(bad.problems[0], /须从可选值里选/);
+});
+
+// ---------- 生成详情：参数怎么摆 ----------
+test('长文本判定：超过 60 字或带换行就限高，短的不动', () => {
+  assert.equal(isLongParam('猫'), false);
+  assert.equal(isLongParam('一'.repeat(60)), false);
+  assert.equal(isLongParam('一'.repeat(61)), true);
+  assert.equal(isLongParam('第一行\n第二行'), true);
+  assert.equal(paramIsLong(true, '一'.repeat(61)), true);
+  assert.equal(paramIsLong(true, '猫'), false, '短文本独占一行也不用限高');
+  assert.equal(paramIsLong(false, '一'.repeat(61)), false, '没独占一行的不该限高');
+});
+
+test('生成详情：文生图记录的提示词不塞进三列小格，也不和上方「提示词」重复', () => {
+  const rules = rhRules(rhWorkflow('text-to-image'));
+  const prompt = '一只坐在芥末黄丝绒扶手椅上的猫，暖色自然光，写实摄影，浅景深，柔和胶片颗粒，细节丰富，构图完整。';
+  const entries = flowDisplayParams({ prompt, width: 1080, height: 1920, batch_size: 1, seed: 527633149753192 }, rules, prompt);
+  assert.equal(entries.some(([name]) => name === '画面描述'), false, '和上方提示词一字不差的那份不再列');
+  assert.deepEqual(entries.find(([name]) => name === '宽度'), ['宽度', '1080', false]);
+  assert.deepEqual(entries.find(([name]) => name === '高度'), ['高度', '1920', false]);
+  assert.deepEqual(entries.find(([name]) => name === '每次出图张数'), ['每次出图张数', '1', false]);
+  assert.equal(entries.some(([, , wide]) => wide), false, '数值参数仍然并排');
+});
+
+test('生成详情：和上方提示词不同时保留，并独占整行', () => {
+  const rules = rhRules(rhWorkflow('text-to-image'));
+  const polished = 'A beautiful cat in a vintage armchair, warm daylight, photorealistic, '.repeat(3);
+  const entries = flowDisplayParams({ prompt: polished, width: 1080 }, rules, '一只猫');
+  const shown = entries.find(([name]) => name === '画面描述');
+  assert.ok(shown, '润色后的提示词要单独列出来');
+  assert.equal(shown[2], true, '提示词独占一行');
+  assert.equal(isLongParam(shown[1]), true, '长文本会限高滚动');
+  assert.equal(entries.find(([name]) => name === '宽度')[2], false);
+  // 文本域即使只填两个字，也不该被塞进小格。
+  assert.equal(flowDisplayParams({ prompt: '猫' }, rules, '狗')[0][2], true);
+});
+
+test('生成详情：素材不重复列，开关写成人话，普通长文本也独占一行', () => {
+  const rules = {
+    prompt: { type: 'prompt', label: '画面描述' },
+    ref_image_0: { type: 'image', label: '参考图' },
+    watermark: { type: 'boolean', label: '水印' },
+    note: { type: 'string', label: '备注', max_length: 50 },
+  };
+  const entries = flowDisplayParams(
+    { prompt: '猫', ref_image_0: '/media/a.png', watermark: true, note: '很长'.repeat(40) },
+    rules,
+    '猫',
+  );
+  assert.equal(entries.some(([name]) => name === '参考图'), false);
+  assert.equal(entries.some(([name]) => name === '画面描述'), false);
+  assert.deepEqual(entries.find(([name]) => name === '水印'), ['水印', '开', false]);
+  assert.equal(entries.find(([name]) => name === '备注')[2], true);
 });

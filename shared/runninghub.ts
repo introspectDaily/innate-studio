@@ -13,6 +13,10 @@
 
 import type { InputRule } from './autodl.ts';
 import { cleanInputs, ruleDefault } from './autodl.ts';
+import workflowRegistry from './runninghub-workflows.json' with { type: 'json' };
+
+// 工作流 ID 的登记表（shared/runninghub-workflows.json，进 git）。登记表里没有的 key 返回 undefined，即该站点没有 ID。
+const idsOf = (key: string): RhWorkflowIds | undefined => (workflowRegistry.workflows as Record<string, { ids: RhWorkflowIds }>)[key]?.ids;
 
 // 这些工作流在页面上的 id 前缀：flow:rh:<key>。和 AutoDL 的 flow:<uuid> 并列出现在模型菜单里。
 export const RH_PROVIDER = 'runninghub';
@@ -77,6 +81,9 @@ export interface RhParam {
   unit?: 'seconds';
   fps?: number;
   default?: string | number | boolean;
+  // 不填时每次现生成一个随机整数（seed 这类参数）。不能给固定默认值，否则每次都出同一张图。
+  // 生成的值会写回 inputs，所以记录里留着这次用的种子，填回来就能复现。
+  randomize?: boolean;
   // 界面上那句说明（为什么这么填）。
   hint?: string;
 }
@@ -123,7 +130,12 @@ export interface RhWorkflow {
   // 一句话说清它是干什么的，出现在工作流选择卡片上。
   summary: string;
   kind: 'video' | 'image' | 'audio';
-  // RunningHub 上的工作流 id（按站点可不同）。留空表示「由服务端配置」，见 server/runninghub.js 的 resolveWorkflowId。
+  // 提交到哪个端点：workflow = 自己导出的 ComfyUI 工作流（默认，V2 /openapi/v2/run/workflow/{id}）；
+  // ai-app = 平台包装过的「AI 应用」（V2 /openapi/v2/run/ai-app/{appId}）。两者 nodeInfoList 形状一样，
+  // 但 URL 和请求体不同：AI 应用的值按平台示例一律发字符串、还带 usePersonalQueue，见 server/runninghub.js。
+  endpoint?: 'workflow' | 'ai-app';
+  // RunningHub 上的工作流 id（按站点可不同）。不写在这里：从 shared/runninghub-workflows.json 按 key 取，见 idsOf。
+  // endpoint 是 ai-app 时那里填的是 AI 应用 id（webappId），不是工作流 id。
   workflowId?: string | RhWorkflowIds;
   images?: RhSlot[];
   videos?: RhSlot[];
@@ -267,11 +279,9 @@ export const RH_WORKFLOWS: RhWorkflow[] = [
     name: '海螺 H3 人物替换 v1.5',
     summary: '把原视频里的人换成参考图里的角色，保留原片的动作、运镜和声音。',
     kind: 'video',
-    // workflowId 留空：在 RunningHub 上「保存并导出 API」之后，把 id 配到环境变量
-    // RUNNINGHUB_WORKFLOW_HAILUO_H3_SWAP（两个站点同一个 id）或
-    // RUNNINGHUB_WORKFLOW_HAILUO_H3_SWAP_AI / _CN（两个站点各自一个 id），
-    // 也可以写在数据目录 config.json 的 runninghubWorkflows.hailuo-h3-swap 里（可以给 {cn, ai}）。
+    // 工作流 ID 在 shared/runninghub-workflows.json 里登记（还没填，在 RunningHub 上「保存并导出 API」后填进去）。
     // 工作流 1.5 版按「海螺H3 人物替换专用流v1.5_api.json」登记的节点。
+    workflowId: idsOf('hailuo-h3-swap'),
     images: [
       { nodeId: '215', field: 'image', label: '角色卡' },
       { nodeId: '218', field: 'image', label: '参考图 2' },
@@ -305,7 +315,7 @@ export const RH_WORKFLOWS: RhWorkflow[] = [
     // 810 WORKFLOW_NOT_SAVED_OR_NOT_RUNNING（那份从没在 RunningHub 界面里保存并运行过）。
     // 用 /api/openapi/getJsonApiFormat 核对过：95 个节点，736 是 PrimitiveInt(value=3)，
     // 750/751/757 是 a>=2/a>=3/a>=9，9 个 LoadImage 都在。
-    workflowId: { ai: '2116808527745449985' },
+    workflowId: idsOf('hailuo-h3-swap-9'),
     // 节点 215/218/221/614/615/618/730/731/732 是工作流里的 9 个 LoadImage，
     // 对应提示词里的 <Picture 1> ~ <Picture 9>。顺序不能改。
     images: [
@@ -332,6 +342,30 @@ export const RH_WORKFLOWS: RhWorkflow[] = [
     machines: ['default', 'plus', 'ultra'],
     outputNodes: ['207'],
     estimate: { default: 0.5, plus: 1, ultra: 2 },
+  },
+  {
+    // 这条不是 ComfyUI 工作流，是 RunningHub 的「AI 应用」：平台把工作流包成带表单的产品页，
+    // appId 独立、提交端点也不同。参数照官方「导出 API」给出的 curl 登记：
+    //   5.text 是提示词，7.width/height/batch_size 是出图尺寸和张数，6.seed 是随机种子。
+    // id 来自 https://www.runninghub.ai 的示例，只在海外站有；国内站要用得另存一份应用并配 _CN。
+    key: 'text-to-image',
+    name: '文生图（AI 应用）',
+    summary: '写一段画面描述直接出图，可调尺寸、随机种子和每次出几张。',
+    kind: 'image',
+    endpoint: 'ai-app',
+    workflowId: idsOf('text-to-image'),
+    prompt: { nodeId: '5', field: 'text', label: '画面描述', required: true },
+    params: [
+      { key: 'width', label: '宽度', nodeId: '7', field: 'width', type: 'int', min: 512, max: 2048, default: 1080, hint: '示例是 1080×1920 竖图。多数模型要求边长是 16 或 32 的倍数，出图失败先换成 1024 / 1536 这类整数试试' },
+      { key: 'height', label: '高度', nodeId: '7', field: 'height', type: 'int', min: 512, max: 2048, default: 1920, hint: '和宽度一起决定画幅；越大越慢、越吃显存' },
+      // 种子不能写死：写死每次都出同一张图。留空时 rhPlan 现生成一个，并记在记录里供复现。
+      { key: 'seed', label: '随机种子', nodeId: '6', field: 'seed', type: 'int', min: 0, max: 999999999999999, randomize: true, hint: '留空每次随机；填同一个数可以复现同一张图' },
+      { key: 'batch_size', label: '每次出图张数', nodeId: '7', field: 'batch_size', type: 'int', min: 1, max: 4, default: 1, hint: '一次生成几张；张数越多耗时和消耗越高' },
+    ],
+    // 查询示例里成图来自节点 2（outputType: png），把它排在主文件第一位。
+    outputNodes: ['2'],
+    // 未实测的估价（元/次）。跑过几次后按平台 usage.consumeMoney 校正。
+    estimate: { default: 0.1 },
   },
 ];
 
@@ -493,6 +527,16 @@ export function rhPlan(workflow: RhWorkflow, raw: Record<string, unknown> = {}, 
       // 换算成帧时（秒 × fps 向上取整）依然保证不丢结尾。
       raw = { ...raw, [param.key]: Math.min(Math.ceil(duration * 10) / 10, param.max ?? Infinity) };
     }
+  }
+  // 标了 randomize 的参数（随机种子）：没填就现生成一个。放在 cleanInputs 之前，
+  // 让它照样过一遍 min/max 校验；值留在 inputs 里，记录能照着复现这次的图。
+  for (const param of workflow.params || []) {
+    if (!param.randomize) continue;
+    const given = raw?.[param.key];
+    if (given !== undefined && given !== null && String(given).trim() !== '') continue;
+    const min = typeof param.min === 'number' && Number.isFinite(param.min) ? Math.ceil(param.min) : 0;
+    const max = typeof param.max === 'number' && Number.isFinite(param.max) ? Math.floor(param.max) : 2147483647;
+    raw = { ...raw, [param.key]: min + Math.floor(Math.random() * Math.max(1, max - min + 1)) };
   }
   const cleaned = cleanInputs(rules, raw);
   // 素材缺失的说法自己重写一遍：cleanInputs 只知道规则的标签，拼出来是「请填写图片参考图 2」，

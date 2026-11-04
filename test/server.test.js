@@ -1178,7 +1178,9 @@ test('AutoDL 工作流：目录和规则、提交前校验、参数换成 data U
   const [first, second] = catalog.data.items;
   assert.deepEqual(catalog.data.items.map((item) => item.uuid), ['indextts_demo', 'minimax_h3_demo'], '按最近一周的用量排');
   assert.equal(first.media.includes('audio'), true);
-  assert.equal(second.fromCredits, 60);
+  // 不再给积分起价：只说来自哪个平台。
+  assert.equal(second.provider, 'autodl');
+  assert.equal(second.fromCredits, undefined);
   assert.equal(second.media.includes('image'), true);
   // 出什么类型的文件、计费配置：画布把工作流当模型列出来、预估花费都要这两项。
   assert.equal(first.output, 'audio');

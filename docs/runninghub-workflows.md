@@ -11,6 +11,9 @@ RunningHub 有两类能力：
 | 入参 | 语义化字段（`prompt`、`duration`、`imageUrl`） | `nodeInfoList`：节点 ID + 字段名 + 字段值 |
 | 能不能改结构 | 不能 | **不能** |
 
+还有第三类 **AI 应用**（`ai-app`）：平台把工作流包成带表单的产品页，入参同样是 `nodeInfoList`，
+但提交端点、字段值类型和请求体都不一样，见下面「AI 应用」一节。
+
 工作流 API 只能**替换某个节点某个字段的值**，不能增删节点、不能改连线。所以：
 
 - 「原始工作流收 3 张图，我们只想收 2 张」这件事，API 层做不到让第 3 个 `LoadImage` 消失。
@@ -38,6 +41,7 @@ RunningHub 有两类能力：
   name: '海螺 H3 人物替换 v1.5',
   summary: '一句话说明，出现在选择卡片上',
   kind: 'video',                // video / image / audio：决定它出现在哪类节点的模型菜单里
+  endpoint: 'workflow',         // workflow（默认，ComfyUI 工作流）/ ai-app（平台包装过的 AI 应用）
   images: [{ nodeId: '215', field: 'image', label: '角色卡' }],   // 素材位，按顺序填
   minImages: 2,                 // 至少要几张（少于这个数不提交）
   fill: 'last',                 // last / skip：空位怎么办
@@ -48,6 +52,11 @@ RunningHub 有两类能力：
   estimate: { default: 0.5, plus: 1, ultra: 2 },                 // 每档机器的估价（元），预扣用
 }
 ```
+
+`kind` 决定这条工作流出现在哪儿：`image` 的工作流（比如 `text-to-image`）会和普通图片型号并列，出现在
+**创作页「图片」类型的模型菜单**和**画布的图片节点**里；`video` / `audio` 同理。创作页选中它之后，提示词仍写在
+主文本框，宽高、种子、每次出几张这类参数收进工具栏的「参数」面板，提交走工作流接口（不是 `/api/images`）。
+只配了 RunningHub、没有火山图片 Key 的账号，「图片」这一类型也照样能进、能用。
 
 `nodeId` / `field` 从哪来：RunningHub 上「导出 API」下载的那份 JSON，键是节点 ID，`inputs` 里的键是字段名。
 注意看**哪个节点的输出是最终结果**，种子之类的参数要挂在最终那一遍采样的节点上（海螺 H3 里是 `205`，
@@ -64,24 +73,54 @@ RunningHub 有两类能力：
 
 枚举一定要写 `value`，并且和原字段的类型完全一致（整数就发整数，字符串就发字符串）。
 
+### AI 应用（`endpoint: 'ai-app'`）
+
+`text-to-image`（文生图）这类不是自己导出的 ComfyUI 工作流，而是平台包装过的「AI 应用」：
+提交端点是 `/openapi/v2/run/ai-app/{appId}`，不是 `/openapi/v2/run/workflow/{workflowId}`。
+登记表里除了 `endpoint` 之外写法完全一样——`prompt` / `params` 仍然编译成同一套界面规则，
+计费、Key 路由、轮询、下载也全部复用。差别由 `server/runninghub.js` 的 `submitWorkflow` 统一处理：
+
+| | ComfyUI 工作流 | AI 应用 |
+| :--- | :--- | :--- |
+| 提交路径 | `/openapi/v2/run/workflow/{workflowId}` | `/openapi/v2/run/ai-app/{appId}` |
+| `nodeInfoList` | 值保持原类型（数字就发数字） | 值一律转字符串、每项带 `description: null`（照平台示例 curl） |
+| 额外请求字段 | `instanceType` | `instanceType` + `usePersonalQueue: "false"` |
+| V2 挂了退回 V1 | `/task/openapi/create` | **不退回**：V1 要 19 位 `webappId` 的 integer，JS 转数字会丢精度 |
+
+登记时按平台「导出 API」给的 curl 把节点抄进登记表，例如文生图这条：
+`5.text` 提示词、`7.width` / `7.height` / `7.batch_size` 出图尺寸与张数、`6.seed` 随机种子；
+查询示例里成图来自节点 `2`（`outputType: png`），所以 `outputNodes: ['2']`。
+
+**种子不要写死默认值**：写死会导致每次生成都是同一张图。给参数加 `randomize: true` 且不写 `default`，
+`rhPlan` 会在用户没填时现生成一个随机整数并写回 `inputs`（记录里留着，填回来就能复现）。
+这条工作流的 `estimate: { default: 0.1 }` 只是未实测的占位估价，跑过几次按平台 `usage.consumeMoney` 校正。
+
 ### 工作流 ID 放哪
 
 RunningHub 有**两个站点**：国内站 `runninghub.cn`、海外站 `runninghub.ai`。两个站是独立的产品——账号、
 Key、工作流 ID、素材库都不通用，同一个工作流在两边导出的 ID 也不一样。所以 ID 是**按站点**配的。
 
-不在代码里写死。按站点取，优先级从高到低：
+登记在 `shared/runninghub-workflows.json`，随代码进 git，改了 ID 提交一次就能追溯。不用环境变量，也不用 `config.json`。格式：
 
-1. 分站环境变量 `RUNNINGHUB_WORKFLOW_<KEY>_<SITE>`，如 `RUNNINGHUB_WORKFLOW_HAILUO_H3_SWAP_CN`、
-   `RUNNINGHUB_WORKFLOW_HAILUO_H3_SWAP_AI`；
-2. 通用环境变量 `RUNNINGHUB_WORKFLOW_<KEY>`（两个站同一个 ID 时才这么写，它会盖住两个站）；
-3. 数据目录 `config.json` 的 `runninghubWorkflows`，可以是字符串（两个站共用），也可以是
-   `{ "hailuo-h3-swap": { "cn": "1904…", "ai": "2003…" } }`；
-4. 登记表里的 `workflowId`（同样可以是字符串或 `{cn, ai}`）。
+```json
+{
+  "workflows": {
+    "hailuo-h3-swap": { "ids": { "cn": "1904…", "ai": "2003…" }, "note": "…" },
+    "text-to-image":  { "ids": { "ai": "2083580194556071937" }, "note": "AI 应用 appId" }
+  }
+}
+```
 
-`<KEY>` 是登记表的 `key` 转大写、非字母数字换成 `_`（`hailuo-h3-swap` → `RUNNINGHUB_WORKFLOW_HAILUO_H3_SWAP`）。
+- `key` 必须和 `shared/runninghub.ts` 里 `RH_WORKFLOWS` 的 `key` 一致；代码里用 `idsOf('<key>')` 把它挂到 `workflowId` 上。
+- `ids.cn` 是国内站 `runninghub.cn`，`ids.ai` 是海外站 `runninghub.ai`。两站共用同一个 ID 就两个都填。
+- `note` 写来源和注意事项，给以后的人看。
+- 留空的站点不接单。管理面板「RunningHub 密钥池」里能看到它还缺哪一行（显示的是这个文件的路径）。
 
-**一个站点配好就能用**：只有 `_CN` 的 Key 会接单，只有 `_AI` 的 Key 接单，两个都配就两边都能排。
-全都没配的工作流不会出现在页面的工作流列表里，但在「管理 → RunningHub 密钥池」里能看到它还缺哪个变量。
+`endpoint: 'ai-app'` 时这个字段填的是 **AI 应用 id（webappId）**，不是工作流 id；管理面板会给这类工作流标一个「AI 应用」。
+文生图那条的海外站 appId 已经登记在上面。国内站要另存一份应用，把 ID 填进 `cn`。
+
+**一个站点配好就能用**：只有 `cn` 有 ID 的工作流只派给国内站的 Key，只有 `ai` 有 ID 的只派给海外站的 Key，两个都填就两边都能排。
+全都没配的工作流不会出现在页面的工作流列表里，但在「管理 → RunningHub 密钥池」里能看到它还缺哪一行。
 
 ## 多个 Key 怎么配
 
@@ -159,6 +198,8 @@ Key、工作流 ID、素材库都不通用，同一个工作流在两边导出�
 | `runninghub_1` / `runninghub_802`（Key 无效） | Key 的 `site` 写错了：`.ai` 的 Key 拿去打 `.cn` 就会这样 |
 | `runninghub_803` / `runninghub_1101` | `nodeId` 或 `field` 和工作流定义对不上，或者字段类型不一致 |
 | `runninghub_810` | 工作流在平台上没保存，或者从没手动跑过一次 |
+| `runninghub_901`（AI 应用不存在） | `ai-app` 的 id 配成了工作流 id，或者这个应用只存在于另一个站点（文生图目前只有海外站） |
+| 文生图每次都出同一张图 | 种子写死了：留空即可，登记表的 `randomize: true` 会每次现生成 |
 | `runninghub_435` | 选了账号没有的机器档位（两个站的机器档位也不通用） |
 | `runninghub_1505` | 平台禁止生成真人，换素材 |
 | 提交时 429 | 所有 Key 都在忙：加 Key、把 `concurrency` 调大，或者等一会儿 |

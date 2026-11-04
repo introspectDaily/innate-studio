@@ -15,7 +15,6 @@ import { RH_PROVIDER, RH_SITES, RH_WORKFLOWS, rhCost, rhMachines, rhMedia, rhPla
 import { applyTaskState, historyView, newItem } from '../tasks.js';
 import { previewState, startPreview, stopPreview } from '../rhpreview.js';
 import { holdCredits, syncCredits } from '../credits.js';
-import { toCredits } from '../../shared/models.ts';
 
 // 目录：登记表里至少在一个站点上配好了工作流 ID 的那几个。一个都没配的不出现在页面上（在管理面板里能看到为什么）。
 function catalog() {
@@ -23,7 +22,6 @@ function catalog() {
     .filter(({ ids }) => RH_SITES.some((site) => Boolean(ids[site])))
     .map(({ workflow, ids }) => {
       const estimate = workflow.estimate || {};
-      const from = rhCost(workflow.key, {});
       const readySites = RH_SITES.filter((site) => Boolean(ids[site]));
       return {
         uuid: rhUuid(workflow.key),
@@ -33,12 +31,12 @@ function catalog() {
         output: workflow.kind,
         media: rhMedia(workflow),
         rules: rhRules(workflow),
+        // workflow = 自己导出的 ComfyUI 工作流；ai-app = 平台包装过的 AI 应用（提交端点不同）。
+        endpoint: workflow.endpoint || 'workflow',
         // 提示词里 @ 引用的写法（<Picture 1> 这种）。画布提交前照着换。
         mentions: workflow.mentions || null,
         machines: rhMachines(workflow).map((machine) => ({ value: machine.value, label: machine.label, note: machine.note })),
         provider: RH_PROVIDER,
-        // 价格：按标准档的估价。页面上的「起 N 积分」用它，服务端预扣用同一份估价（rhCost）。
-        fromCredits: from == null ? null : toCredits(from),
         billing: { price_type: 'rh_machine', billing_config: { rh_machine: estimate }, price: Math.round((Number(estimate.default) || 0) * 100) },
         // 这个工作流在哪几个站点上能用（用户不选站点：由 Key 池按站点路由）。
         sites: readySites,
@@ -179,7 +177,8 @@ route('POST', /^\/api\/runninghub\/submit$/, async ({ req, space, user }) => {
       });
       return hit && names.has(hit.key) ? { ...item, fieldValue: names.get(hit.key) } : item;
     });
-    ({ taskId, data: submitted } = await submitWorkflow(lease, workflowId, outbound, { instanceType: machine }));
+    // endpoint 决定提交到 /run/workflow/{id} 还是 /run/ai-app/{appId}（后者字段值要按字符串发）。
+    ({ taskId, data: submitted } = await submitWorkflow(lease, workflowId, outbound, { instanceType: machine, endpoint: workflow.endpoint || 'workflow' }));
     claim(lease, taskId);
   } catch (err) {
     drop(lease);

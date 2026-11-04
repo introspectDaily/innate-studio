@@ -12,12 +12,12 @@ import { Icon } from './ui/Icon.tsx';
 import { Segmented, SearchBox, tip, clipTip } from './ui/controls.tsx';
 import { toast, openModal, openMenu, confirmDialog, copyText } from './ui/layers.tsx';
 import { openVideoEditor } from './editor/VideoEditor.tsx';
-import { enter } from './ui/motion.ts';
+import { enter, reducedMotion } from './ui/motion.ts';
 import { FailureState, explainFailure, refundNote } from './ui/states.tsx';
-import { setForm, setStudio, setFlow, submit, useImageForVideo, useVideoForMusic } from './composer/state.ts';
+import { composer, dismissTask, draftPrompt, setForm, setStudio, setFlow, submit, useImageForVideo, useVideoForMusic } from './composer/state.ts';
 import { openCharacterEditor } from './characters.tsx';
 import { IMAGE_QUALITY_LABELS, REFERENCE_MODE_LABEL, estimateCost } from '../../shared/models.ts';
-import { ruleLabel } from '../../shared/autodl.ts';
+import { flowDisplayParams, paramIsLong } from '../../shared/autodl.ts';
 import type { CreateType, HistoryItem, Ref } from './types.ts';
 
 const MODE_LABELS: Record<string, string> = { text: '文生视频', frames: '首尾帧', edit: '编辑视频', extend: '延长视频' };
@@ -31,7 +31,12 @@ const message = (err: unknown) => (err as Error).message;
 // 工作流（AutoDL.art 或 RunningHub）提交的记录：参数、素材、复用的方式和普通型号不一样。
 const isFlowItem = (item: HistoryItem) => item.provider === 'autodl' || item.provider === 'runninghub';
 // 这条记录是哪种内容：工作流、视频、图片，或者音频里的语音、音效、配乐。
-const typeOf = (item: HistoryItem): CreateType => (isFlowItem(item) ? 'flow' : item.kind === 'audio' ? item.tool! : item.kind);
+// 工作流产出的图片（比如图片页里选的出图工作流）归「图片」：图片页的模型菜单里列着这些工作流，结果也是图片。其余工作流的记录归「工作流」。
+const typeOf = (item: HistoryItem): CreateType => {
+  if (item.kind === 'image') return 'image';
+  if (isFlowItem(item)) return 'flow';
+  return item.kind === 'audio' ? item.tool! : item.kind;
+};
 const typeLabel = (item: HistoryItem) => TYPE_LABELS[typeOf(item)];
 // 没有提示词的记录（配乐、只填了素材和参数的工作流）用它的类型或工作流的名字来称呼。
 const nameOf = (item: HistoryItem) => item.prompt || (isFlowItem(item) ? item.model : '') || typeLabel(item);
@@ -96,7 +101,18 @@ function fill(item: HistoryItem) {
   goTo('create');
 }
 
-function reuse(item: HistoryItem) {
+// 复用、重新生成都会把参数填回输入框。输入框里还有没提交的提示词时先问一句，不然会被直接替换掉。返回是否可以继续。
+async function replaceDraft(item: HistoryItem) {
+  const draft = draftPrompt().trim();
+  if (draft && draft !== (item.prompt || '').trim()) {
+    const ok = await confirmDialog({ title: '替换输入框的内容？', message: '输入框里还有没提交的提示词，复用这条记录后会被替换。', okText: '替换' });
+    if (!ok) return false;
+  }
+  return true;
+}
+
+async function reuse(item: HistoryItem) {
+  if (!(await replaceDraft(item))) return;
   fill(item);
   toast('已复用参数', 'success');
 }
@@ -105,7 +121,8 @@ function reuse(item: HistoryItem) {
 const canRetry = (item: HistoryItem) => item.status === 'failed' && !isTimedOutTask(item) && !item.form?.from;
 
 // 失败的记录：用同样的参数再提交一次。结果是一条新记录，失败的那条留着，可以自己删。
-function retry(item: HistoryItem) {
+async function retry(item: HistoryItem) {
+  if (!(await replaceDraft(item))) return;
   fill(item);
   submit();
 }
@@ -390,17 +407,11 @@ type Entry = [name: string, value: ReactNode, wide?: boolean];
 const present = ([, value]: Entry) => value != null && value !== '' && value !== false;
 
 // 详情右边「生成参数」那一组：一格一项，名称在上、取值在下。第三个值为 true 的独占一行。
-// 型号名长，挤在一格里会从中间断行，所以「模型」独占一行。
+// 型号名长，挤在一格里会从中间断行，所以「模型」独占一行；提示词和长文本同理，见 flowDisplayParams。
 function paramsOf(item: HistoryItem): Entry[] {
   const p = item.payload || {};
-  // 工作流的参数是按规则填的，名字也按规则写成人话；素材在「参考素材」里看。
-  if (isFlowItem(item)) {
-    const rules = item.workflow?.rules || {};
-    const fields = Object.entries(p)
-      .filter(([key]) => !/^(image|video|audio)$/.test(rules[key]?.type || ''))
-      .map(([key, value]): Entry => [ruleLabel(rules[key] || { type: 'string' }, key), typeof value === 'boolean' ? (value ? '开' : '关') : String(value)]);
-    return [['工作流', item.model, true], ...fields];
-  }
+  // 工作流的参数按规则写成人话；素材在「参考素材」里看，长文本独占一行。
+  if (isFlowItem(item)) return [['工作流', item.model, true], ...flowDisplayParams(p, item.workflow?.rules || {}, item.prompt || '')];
   // 用了技能的记录：提示词是扩写出来的，这里标出用的是哪个技能、用户原来写的是什么。
   const skill: Entry[] = item.form?.skill ? [['技能', item.form.skill.name], ['原始输入', item.form.prompt, true]] : [];
   if (item.kind === 'image') return [['模型', item.model, true], ['画面比例', p.aspect_ratio], ['分辨率', p.resolution], ['画质', p.quality ? IMAGE_QUALITY_LABELS[p.quality] || p.quality : null], ...skill];
@@ -604,12 +615,16 @@ function Detail({ item, close, nav }: { item: HistoryItem; close: () => void; na
           )}
           <Section title="生成参数">
             <dl className="param-grid">
-              {params.map(([name, value, wide]) => (
-                <div key={name} className={wide ? 'param wide' : 'param'}>
-                  <dt>{name}</dt>
-                  <dd>{value}</dd>
-                </div>
-              ))}
+              {params.map(([name, value, wide]) => {
+                // 独占一行的长文本（提示词、扩写前的原始输入）限高滚动，别把右栏撑得没边。
+                const long = paramIsLong(wide, value);
+                return (
+                  <div key={name} className={`param${wide ? ' wide' : ''}${long ? ' is-long' : ''}`}>
+                    <dt>{name}</dt>
+                    <dd>{value}</dd>
+                  </div>
+                );
+              })}
             </dl>
           </Section>
           <Section title="任务信息">
@@ -632,6 +647,86 @@ export function openDetail(id: string, scope: Scope = () => state.history) {
 }
 
 // ---------- 两处列表 ----------
+
+// 输入框下面的「当前任务」：刚提交成功的那一条。生成中显示阶段（视频有百分比，其余只能看到在等、等了多久）；
+// 完成后可以打开详情；失败给出一句原因，能重新生成。点叉收起，记录本身还在「最近生成」里。换了类型也收起。
+export function TaskStrip() {
+  useStore('history', 'composer');
+  const ref = useRef<HTMLElement>(null);
+  const tracked = composer.tracked;
+  const id = tracked?.id;
+  // 新提交的一条进场，并滚到看得见的地方（它就在输入框下面，多半只动一点点）。
+  useLayoutEffect(() => {
+    if (!id || !ref.current) return;
+    enter(ref.current, { y: -4, duration: 200 });
+    ref.current.scrollIntoView({ block: 'nearest', behavior: reducedMotion() ? 'auto' : 'smooth' });
+  }, [id]);
+  if (!tracked || tracked.type !== composer.studio.type) return null;
+  const item = state.history.find((i) => i.id === tracked.id);
+  const label = TYPE_LABELS[tracked.type];
+  const video = item?.kind === 'video';
+  const progress = Math.max(0, Math.min(100, item?.progress || 0));
+  const finished = Boolean(item && done(item));
+  const failed = item?.status === 'failed';
+  const status = !item
+    ? '已提交'
+    : item.status === 'queued'
+      ? '排队中'
+      : item.status === 'in_progress'
+        ? video
+          ? `生成中 ${progress}%`
+          : '生成中'
+        : item.status === 'completed'
+          ? finished
+            ? '已完成'
+            : '已完成，未获取到结果'
+          : isTimedOutTask(item)
+            ? '查询超时'
+            : `${label}生成失败`;
+  const sub = !item ? '正在记录…' : failed ? explainFailure(item.error?.message) : finished ? nameOf(item) : null;
+  return (
+    <section ref={ref} className={`task-strip is-${failed ? 'failed' : finished ? 'done' : 'pending'}`}>
+      <div className="task-thumb">
+        {finished ? <Thumb thumb={item!.thumbUrl || (item!.kind === 'image' ? item!.mediaUrl : null)} kind={item!.kind} /> : failed ? <Icon name="alert" size={18} /> : <span className="spinner" />}
+      </div>
+      <div className="task-body">
+        <div className="task-head">
+          <span className="task-title">{label}</span>
+          <span className="task-status">{status}</span>
+        </div>
+        {item && !finished && !failed && (
+          <>
+            {item.prompt && <div className="pending-prompt" {...clipTip(item.prompt)}>{item.prompt}</div>}
+            <div className="pending-meta">
+              {item.createdAt ? <Elapsed since={item.createdAt} /> : null}
+            </div>
+          </>
+        )}
+        {sub && <div className="task-sub ellipsis" {...clipTip(sub)}>{sub}</div>}
+        {video && item && !finished && !failed && (
+          <div className="task-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress}>
+            <span style={{ width: `${progress}%` }} />
+          </div>
+        )}
+      </div>
+      <div className="task-actions">
+        {item && (
+          <button className="btn btn-sm" type="button" onClick={() => openDetail(item.id)}>
+            详情
+          </button>
+        )}
+        {item && canRetry(item) && (
+          <button className="btn btn-sm" type="button" onClick={() => retry(item)}>
+            重新生成
+          </button>
+        )}
+        <button className="icon-btn icon-btn-sm" type="button" aria-label="收起" {...tip('收起')} onClick={dismissTask}>
+          <Icon name="x" size={14} />
+        </button>
+      </div>
+    </section>
+  );
+}
 
 // 创作页输入框下面：只列当前这种内容最新的几条，刚提交的任务在这里看进度。上面切换类型，这里跟着换。
 export function Recent() {

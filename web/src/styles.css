@@ -536,6 +536,19 @@ input[type='search']::-webkit-search-cancel-button { -webkit-appearance: none; }
 .submit-notice > .icon { flex: none; margin-top: var(--sp-4); color: var(--danger); }
 .submit-notice-body { display: flex; flex: 1; flex-direction: column; gap: var(--sp-2); min-width: 0; padding-top: var(--sp-2); }
 .submit-notice-detail { color: var(--text-3); font-size: var(--text-caption); overflow-wrap: anywhere; user-select: text; }
+/* 输入框下面的「当前任务」：刚提交成功的那一条。左边 16:9 的小图（生成中是转圈），中间标题、状态、一行说明，右边是操作。 */
+.task-strip { display: flex; align-items: center; gap: var(--sp-12); padding: var(--sp-8) var(--sp-8) var(--sp-8) var(--sp-8); border-radius: var(--r-md); background: var(--surface-1); }
+.task-thumb { flex: none; display: grid; place-items: center; width: 96px; aspect-ratio: 16 / 9; border-radius: var(--r-sm); overflow: hidden; background: var(--surface-2); }
+.task-thumb > .spinner { width: 16px; height: 16px; }
+.task-thumb > .icon { color: var(--danger); }
+.task-body { display: flex; flex: 1; flex-direction: column; gap: var(--sp-2); min-width: 0; }
+.task-head { display: flex; align-items: baseline; gap: var(--sp-8); min-width: 0; font-size: var(--text-ui); }
+.task-title { font-weight: var(--fw-medium); white-space: nowrap; }
+.task-status { color: var(--text-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.task-sub { color: var(--text-3); font-size: var(--text-caption); }
+.task-bar { height: 3px; margin-top: var(--sp-4); border-radius: 3px; background: var(--surface-3); overflow: hidden; }
+.task-bar > span { display: block; height: 100%; border-radius: inherit; background: var(--text); transition: width 480ms var(--ease-out); }
+.task-actions { display: flex; flex: none; align-items: center; gap: var(--sp-4); }
 .prompt { grid-column: 2; grid-row: 1; display: block; width: 100%; min-height: 72px; max-height: 280px; padding: var(--sp-16) var(--sp-16) var(--sp-8); border: 0; outline: 0; background: transparent; color: var(--text); font-size: var(--text-body); line-height: var(--lh-body); resize: none; }
 .prompt::placeholder { color: var(--text-3); }
 .composer-bar { grid-column: 1 / -1; grid-row: 2; display: flex; align-items: center; gap: var(--sp-8); padding: var(--sp-4) var(--sp-8) var(--sp-8); }
@@ -819,6 +832,8 @@ input[type='search']::-webkit-search-cancel-button { -webkit-appearance: none; }
 .param.wide { grid-column: 1 / -1; }
 .param dt { font-size: var(--text-caption); color: var(--text-3); }
 .param dd { font-size: var(--text-ui); overflow-wrap: anywhere; }
+/* 提示词这类长文本独占整行，并和上方「提示词」一样限高可滚，保留换行不撑爆右栏 */
+.param.is-long dd { max-height: 10.5em; overflow-y: auto; overscroll-behavior: contain; white-space: pre-wrap; word-break: break-word; }
 .detail-prompt { max-height: 10.5em; overflow-y: auto; overscroll-behavior: contain; white-space: pre-wrap; word-break: break-word; }
 .kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--sp-8) var(--sp-16); font-size: var(--text-ui); }
 .kv dt { color: var(--text-3); }
@@ -1365,3 +1380,4 @@ input[type='search']::-webkit-search-cancel-button { -webkit-appearance: none; }
 /* 工作流那两行没有站点和在跑数，名字可以占宽一点。 */
 .rh-pool-flow { display: flex; align-items: baseline; gap: var(--sp-8); min-width: 0; font-size: var(--text-caption); }
 .rh-pool-flow .rh-pool-title { max-width: 50%; }
+.rh-pool-flow .badge { flex: none; }

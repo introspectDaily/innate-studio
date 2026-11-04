@@ -12,15 +12,14 @@ import { listWorkflows, getWorkflow, submitWorkflow } from '../autodl.js';
 import { applyTaskState, historyView, newItem } from '../tasks.js';
 import { holdCredits, syncCredits } from '../credits.js';
 import { autodlToken } from '../keys.js';
-import { cleanInputs, formValues, mediaAccepts, requiredMedia, workflowCost } from '../../shared/autodl.ts';
-import { toCredits } from '../../shared/models.ts';
+import { cleanInputs, mediaAccepts, requiredMedia } from '../../shared/autodl.ts';
 
 // 工作流目录缓存这么久。平台上新工作流、改规则都能在一分钟内看到，又不用每开一次页面就整个取一遍。
 // 只缓存在进程里，不落盘。
 const CATALOG_TTL_MS = 60 * 1000;
 let catalog = { at: 0, value: null };
 
-// 列表接口不带 input_rules（线上核对过），起价和必填素材要从详情里算。一次取四条，失败的那条按没有规则算，
+// 列表接口不带 input_rules（线上核对过），必填素材和参数规则要从详情里算。一次取四条，失败的那条按没有规则算，
 // 不让一个工作流出错拖住整个目录。
 const DETAIL_CONCURRENCY = 4;
 async function withRules(workflows) {
@@ -32,7 +31,7 @@ async function withRules(workflows) {
           const detail = await getWorkflow(workflow.uuid);
           Object.assign(workflow, { input_rules: detail.input_rules, input_example: detail.input_example, output_example: detail.output_example, billing_config: detail.billing_config ?? workflow.billing_config, description: workflow.description || detail.description || '', cover_image_url: workflow.cover_image_url || detail.cover_image_url || null });
         } catch {
-          /* 取不到详情就不算起价 */
+          /* 取不到详情就只用列表里有的信息 */
         }
       }),
     );
@@ -47,8 +46,6 @@ async function catalogValue() {
   const items = workflows
     .filter((workflow) => workflow?.uuid)
     .map((workflow) => {
-      // 起价：按表单初始值估一份。按秒计费的时长这时还不知道，起价里只含最低价。
-      const from = workflowCost(workflow, formValues(workflow), 0);
       return {
         uuid: workflow.uuid,
         name: workflow.name || workflow.uuid,
@@ -63,7 +60,8 @@ async function catalogValue() {
         rules: workflow.input_rules || {},
         // 这个工作流必须传的素材类型（image、video、audio），挑选列表里用来分类。
         media: requiredMedia(workflow.input_rules),
-        fromCredits: from == null ? null : toCredits(from),
+        // 来自哪个平台：页面上写「来自 AutoDL」。平台的价格是它自己的单位，不换算成积分。
+        provider: 'autodl',
         usage: Number(workflow.usage_count_7d) || 0,
       };
     })

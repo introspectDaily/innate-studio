@@ -1,15 +1,15 @@
 // 创作输入框的状态和动作：正在编辑的表单、润色、音色试听、提交。界面在 Composer.tsx，把表单拼成请求的逻辑在 request.ts。
 // 这里改完状态都要调 changed()，输入框才会重画。
 
-import { api, state, on, emit, KINDS, startHistoryLoop, loadVoices, loadFlows, polishModel, goTo, usesCredits, type ApiError } from '../store.ts';
+import { api, state, on, emit, KINDS, startHistoryLoop, loadVoices, loadFlows, polishModel, goTo, usesCredits, flowModelsOf, flowSummary, type ApiError } from '../store.ts';
 import { fmtCredits } from '../format.ts';
 import { exclusive } from '../playback.ts';
 import { refFromRecord, kindOfFile, uploadLocalFile } from '../media.ts';
 import { toast } from '../ui/layers.tsx';
-import { buildVideoRequest, buildImageRequest, buildSpeechRequest, buildSfxRequest, buildMusicRequest, refsInUse, carryRefs } from '../request.ts';
+import { buildVideoRequest, buildImageRequest, buildSpeechRequest, buildSfxRequest, buildMusicRequest, buildFlowInputs, buildImageFlowInputs, refsInUse, carryRefs } from '../request.ts';
 import { quoteCost, toCredits, refLimitsOf, type VideoSpec } from '../../../shared/models.ts';
-import { workflowCost, cleanInputs, flowTextKey, flowUuidOf, flowVideoSpec, formValues, isFlowModel, ruleKind, ruleLabel, type InputRule, type WorkflowSummary } from '../../../shared/autodl.ts';
-import { rhCost, rhKeyOfUuid } from '../../../shared/runninghub.ts';
+import { workflowCost, flowTextKey, flowUuidOf, flowVideoSpec, formValues, isFlowModel, ruleLabel, type InputRule, type WorkflowSummary } from '../../../shared/autodl.ts';
+import { isRhUuid, rhCost, rhKeyOfUuid } from '../../../shared/runninghub.ts';
 import type { BuiltRequest, Character, CreateType, FlowSummary, HistoryItem, Kind, Ref, SkillRef, Studio, VideoForm, Voice } from '../types.ts';
 
 // 视频的表单单独存一份（生成记录里存的也是它）；当前选的类型和其余几种的表单存在另一份里。
@@ -128,6 +128,8 @@ export const composer = {
   voiceFilter: 'all' as 'all' | 'zh' | 'en' | 'other',
   // 正在试听的音色。
   previewing: '',
+  // 最近一次提交成功的那条记录（id 和类型）。输入框下面的「当前任务」就显示它的进度。换类型或点叉后不再显示。
+  tracked: null as { id: string; type: CreateType } | null,
 };
 state.createType = composer.studio.type;
 
@@ -336,31 +338,18 @@ export function flowSlots(kind: Kind): { key: string; rule: InputRule }[] {
 }
 
 // 按规则检查现在填的参数：补默认值、删空项、查长度和范围。返回要提交的 inputs 和问题。
+// 拼装规则在 request.ts（纯函数，创作页和画布共用）；这里只多记一份给估价用。
+type FlowValues = { values: Record<string, unknown>; refs: Record<string, Ref | null> };
 let lastFlowInputs: Record<string, unknown> = {};
+function collectFlowInputs(flow: Flow, source: FlowValues): { inputs: Record<string, unknown>; problems: string[] } {
+  const result = buildFlowInputs(flow.input_rules || {}, source);
+  lastFlowInputs = result.inputs;
+  return result;
+}
 export function flowInputs(): { inputs: Record<string, unknown>; problems: string[] } {
   const flow = flowDefinition();
   if (!flow) return { inputs: {}, problems: [composer.flowsError ? `工作流加载失败：${composer.flowsError}` : '请先选择工作流'] };
-  const { values, refs } = composer.studio.flow;
-  const raw: Record<string, unknown> = {};
-  for (const [key, rule] of Object.entries(flow.input_rules || {})) {
-    const kind = ruleKind(rule);
-    if (kind === 'media') {
-      const ref = refs[key];
-      if (ref) raw[key] = ref.url;
-    } else if (kind === 'number') {
-      const text = values[key];
-      if (text !== '' && text != null) raw[key] = Number(text);
-    } else if (kind === 'toggle') {
-      if (values[key] !== undefined) raw[key] = values[key];
-    } else if (kind === 'select') {
-      if (values[key]) raw[key] = values[key];
-    } else if (values[key] !== '' && values[key] != null) {
-      raw[key] = values[key];
-    }
-  }
-  const result = cleanInputs(flow.input_rules || {}, raw);
-  lastFlowInputs = result.inputs;
-  return result;
+  return collectFlowInputs(flow, composer.studio.flow);
 }
 // 按秒计费的工作流要知道要生成多长：duration、audio_duration 这类数字参数，或者参考素材自己的时长。
 export function flowSeconds(): number {
@@ -394,6 +383,37 @@ export async function setFlow(item: HistoryItem) {
   setType('flow');
 }
 
+// ---------- 图片类型里的出图工作流 ----------
+// 画布的图片节点一直把「输出是图片」的工作流当成一种模型；创作页的「图片」也照这个来：
+// 模型菜单里并列显示，提示词仍写在大文本框里，其余参数（宽高、种子、张数）进「参数」面板，
+// 提交走工作流那条接口。参数值复用 studio.flow（同一时间只会编辑一个工作流）。
+export const imageFlowModel = () => (composer.studio.type === 'image' && isFlowModel(composer.studio.image.model) ? composer.studio.image.model : '');
+export const imageFlowSummary = () => (imageFlowModel() ? flowSummary(imageFlowModel()) : null);
+const imageFlowUuid = () => (imageFlowModel() ? flowUuidOf(imageFlowModel()) : '');
+
+// 目录到了、或者切回「图片」时：保证 studio.flow 里装的就是当前选中那条工作流，参数也铺好默认值。
+export function syncImageFlow() {
+  const uuid = imageFlowUuid();
+  if (!uuid) return;
+  if (composer.studio.flow.workflow?.uuid !== uuid) void selectFlow(uuid);
+  else if (!flowDefinition()) loadFlowDefinition();
+}
+
+// 模型菜单换型号：普通图片模型照旧；换成工作流时把它选进工作流表单。
+export function setImageModel(model: string) {
+  updateStudio('image', { model });
+  if (isFlowModel(model)) void selectFlow(flowUuidOf(model));
+}
+
+// 把图片表单的提示词、参考图盖到工作流规则上，再走同一套校验（request.ts 里的纯函数）。
+function imageFlowRequest(prompt?: string): BuiltRequest {
+  const flow = flowDefinition();
+  if (!flow) return { payload: {}, problems: ['工作流规则还没读到，请稍候或重新选一次工作流'] };
+  const built = buildImageFlowInputs(flow.input_rules || {}, composer.studio.image, composer.studio.flow, flowPrimaryKey(), prompt);
+  lastFlowInputs = (built.payload || {}) as Record<string, unknown>;
+  return built;
+}
+
 // ---------- 提交 ----------
 
 // 当前类型的请求和不能提交的原因。prompt 是技能扩写出来的提示词：给了就用它代替输入框里的那句话。
@@ -403,6 +423,8 @@ export function currentRequest(prompt?: string): BuiltRequest {
     const { inputs, problems } = flowInputs();
     return { payload: inputs, problems };
   }
+  // 图片里选了出图工作流：提示词来自图片表单，其余按工作流规则走。
+  if (studio.type === 'image' && imageFlowModel()) return imageFlowRequest(prompt);
   if (studio.type === 'image') return buildImageRequest(prompt === undefined ? studio.image : { ...studio.image, prompt }, imageRefLimit());
   if (studio.type === 'speech') return buildSpeechRequest(studio.speech);
   if (studio.type === 'sfx') return buildSfxRequest(studio.sfx);
@@ -427,7 +449,8 @@ export function submitProblem(): string {
 export function currentCredits(): number | null {
   const { type } = composer.studio;
   const { payload, body } = currentRequest();
-  if (type === 'flow') return flowCredits();
+  // 工作流按任务定价（RunningHub 跟着机器档位走），不能套图片模型的按张估价。
+  if (type === 'flow' || (type === 'image' && imageFlowModel())) return flowCredits();
   if (type === 'video' || type === 'image') {
     const yuan = quoteCost({ kind: type, model: String(payload?.model || ''), payload });
     return yuan == null ? null : toCredits(yuan) * (type === 'image' ? Number(payload?.n) || 1 : 1);
@@ -599,6 +622,8 @@ export function swapFrames() {
 // 图片能选的画面比例：各模型收的比例登记好了，只留这个模型收的。模型列表还没读到时先全列着。
 export const IMAGE_RATIOS = ['16:9', '3:2', '4:3', '1:1', '3:4', '2:3', '9:16'];
 export function imageRatios(model = composer.studio.image.model) {
+  // 出图工作流用自己规则里的宽高，不套普通模型的比例菜单。
+  if (isFlowModel(model)) return [];
   const accepted = state.catalog.imageRatios[model];
   return accepted ? IMAGE_RATIOS.filter((r) => accepted.includes(r)) : IMAGE_RATIOS;
 }
@@ -618,13 +643,18 @@ export function fitImageQuality(model: string, quality?: string) {
   if (!qualities) return undefined;
   return quality && qualities.options.includes(quality) ? quality : qualities.default;
 }
-// 这个图片模型最多收几张参考图（图生图）。0 是不能带参考图。
-export const imageRefLimit = (model = composer.studio.image.model) => state.catalog.imageRefs[model] || 0;
+// 这个图片模型最多收几张参考图（图生图）。0 是不能带参考图。出图工作流看它有几条 image 规则。
+export const imageRefLimit = (model = composer.studio.image.model) =>
+  isFlowModel(model)
+    ? Object.values(flowSummary(model)?.rules || {}).filter((rule) => rule.type === 'image').length
+    : state.catalog.imageRefs[model] || 0;
 // 换了图片模型后，选着的比例它不收就换成它收的第一个；分辨率、画质它没有那一档就换成它默认的；参考图超出它收的张数，多的去掉。
 function fitImage() {
   const { image } = composer.studio;
-  const ratios = imageRatios();
   if (state.catalog.known && (image.refs?.length || 0) > imageRefLimit()) image.refs = (image.refs || []).slice(0, imageRefLimit());
+  // 工作流有自己的宽高、张数参数，普通模型那一套比例/分辨率/画质都不适用，别去动表单。
+  if (isFlowModel(image.model)) return;
+  const ratios = imageRatios();
   if (ratios.length && !ratios.includes(image.ratio)) image.ratio = ratios[0];
   // 模型列表还没读到时先不动，免得把存着的选择冲掉。
   if (state.catalog.known) image.resolution = fitImageSize(image.model, image.resolution);
@@ -657,6 +687,8 @@ export function setType(type: CreateType) {
   persist();
   changed();
   if (type === 'speech') ensureVoices();
+  // 切回「图片」时，之前选的出图工作流可能已被「工作流」页换成别的，重新对齐。
+  if (type === 'image') syncImageFlow();
 }
 
 // 把一份视频表单填回输入框（复用记录时用）。
@@ -865,16 +897,33 @@ export async function submit() {
       request = currentRequest(text);
       if (request.problems.length) throw new Error(request.problems[0]);
     }
-    if (type === 'video') await api('POST', '/api/videos', { payload: request.payload, form });
-    else if (type === 'image') await api('POST', '/api/images', { payload: request.payload, form: { type, ...studio.image } });
-    else if (type === 'flow') {
+    // 每个接口都回这次新建的记录，拿它的 id 去追踪进度。
+    let created: HistoryItem;
+    if (type === 'video') created = await api<HistoryItem>('POST', '/api/videos', { payload: request.payload, form });
+    else if (type === 'image') {
+      const model = imageFlowModel();
+      if (model) {
+        // 出图工作流：和普通工作流共用一套入参，只是入口在「图片」里、主文本来自图片表单。
+        const flow = imageFlowSummary();
+        const uuid = flow?.uuid || flowUuidOf(model);
+        const provider = flow?.provider || (isRhUuid(uuid) ? 'runninghub' : 'autodl');
+        const endpoint = provider === 'runninghub' ? '/api/runninghub/submit' : '/api/autodl/submit';
+        const workflow = { uuid, name: flow?.name || uuid };
+        created = await api<HistoryItem>('POST', endpoint, { workflow: uuid, inputs: request.payload, form: { type: 'flow', workflow, values: request.payload, refs: studio.flow.refs } });
+      } else created = await api<HistoryItem>('POST', '/api/images', { payload: request.payload, form: { type, ...studio.image } });
+    } else if (type === 'flow') {
       // 工作流只给服务端工作流的 uuid 和填的值；素材的地址是记录里的短地址或链接，服务端负责内嵌、换公网直链或上传。
       // 两家工作流共用一套入参形状，只是提交的接口不同。
       const { workflow, refs, values } = studio.flow;
       const provider = state.flows.items.find((item) => item.uuid === workflow?.uuid)?.provider;
       const endpoint = provider === 'runninghub' ? '/api/runninghub/submit' : '/api/autodl/submit';
-      await api('POST', endpoint, { workflow: workflow!.uuid, inputs: request.payload, form: { type, workflow, values, refs } });
-    } else await api('POST', `/api/audio/${type}`, { ...request.body, form: { type, ...studio[type] } });
+      created = await api<HistoryItem>('POST', endpoint, { workflow: workflow!.uuid, inputs: request.payload, form: { type, workflow, values, refs } });
+    } else created = await api<HistoryItem>('POST', `/api/audio/${type}`, { ...request.body, form: { type, ...studio[type] } });
+    // 提交成功：提示词清空（参数留着，下一条接着改），输入框下面的「当前任务」开始显示这一条的进度。
+    composer.tracked = created?.id ? { id: created.id, type } : null;
+    writePrompt('');
+    composer.beforePolish = null;
+    persist();
     toast('已提交', 'success');
     startHistoryLoop();
   } catch (err) {
@@ -918,7 +967,18 @@ export function initComposer() {
   }
   const { studio } = composer;
   fitModel();
+  syncImageFlow();
   if (studio.type === 'speech') ensureVoices();
+
+  // 图片能选的型号：普通图片型号（去掉没配 Key 的）+ 目录里出图的工作流。
+  const imageModelOptions = () => [...state.catalog.image.filter((m) => !state.catalog.unavailable.includes(m)), ...flowModelsOf('image')];
+  // 目录是异步到的：模型列表先到时别把本地存着的出图工作流当成「已下线」冲掉，等 flows 到了再对齐。
+  const alignImageModel = (waitForFlows: boolean) => {
+    const current = composer.studio.image.model;
+    const options = imageModelOptions();
+    if (waitForFlows && isFlowModel(current) && !flowModelsOf('image').length) return;
+    if (options.length && !options.includes(current)) composer.studio.image.model = options[0];
+  };
 
   on('app', () => {
     if (composer.studio.type === 'speech') ensureVoices();
@@ -930,8 +990,8 @@ export function initComposer() {
     const videos = usable(state.models);
     if (!videos.includes(composer.form.model) && videos.length) composer.form.model = videos[0];
     fitModel();
-    const images = usable(state.catalog.image);
-    if (images.length && !images.includes(composer.studio.image.model)) composer.studio.image.model = images[0];
+    alignImageModel(true);
+    syncImageFlow();
     fitImage();
     persist();
     if (state.app.hasKey && info.source === 'default' && info.error) toast(`模型列表加载失败，已显示默认模型。${info.error}`, 'error', 6000);
@@ -939,7 +999,10 @@ export function initComposer() {
   });
   // 读到工作流目录之后，上次选的工作流还在的话把它的规则取回来（表单按规则画）。已经填着的值不动。
   on('flows', () => {
+    alignImageModel(false);
+    syncImageFlow();
     loadFlowDefinition();
+    persist();
     changed();
   });
 }
@@ -957,6 +1020,12 @@ export async function loadFlowDefinition() {
   composer.studio.flow.values = values;
   persist();
   changed();
+}
+
+// 「当前任务」点叉：不再显示这一条（记录本身还在）。
+export function dismissTask() {
+  composer.tracked = null;
+  emit('composer');
 }
 
 export function dismissSubmitError() {

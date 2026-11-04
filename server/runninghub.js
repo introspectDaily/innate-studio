@@ -349,10 +349,12 @@ export async function rhKeyState({ force = false } = {}) {
         key: workflow.key,
         name: workflow.name,
         kind: workflow.kind,
+        // ai-app 是平台包装过的「AI 应用」，提交端点和普通工作流不同，面板上标出来免得把 id 混着配。
+        endpoint: workflow.endpoint || 'workflow',
         ids,
         ready: RH_SITES.some((site) => Boolean(ids[site])),
-        // 没配好的站点，把该填的环境变量名列出来（两个站可以共用同一个 id）。
-        missing: RH_SITES.filter((site) => !ids[site]).map((site) => workflowEnvNames(workflow, site)),
+        // 没配好的站点，把登记表里该填的那一行列出来（两个站可以共用同一个 id）。
+        missing: RH_SITES.filter((site) => !ids[site]).map((site) => workflowIdPath(workflow, site)),
       };
     }),
   };
@@ -360,19 +362,8 @@ export async function rhKeyState({ force = false } = {}) {
 
 // ---------- 工作流 id ----------
 // 每个工作流在 RunningHub 上有一个 id，两个站点各自独立（同一个工作流在 .cn 和 .ai 上导出的 id 不一样）。
-// 取值顺序（按站点）：站点专属环境变量 → 通用环境变量 → 数据目录 config.json → 登记表里写死的。
-//   站点专属：RUNNINGHUB_WORKFLOW_HAILUO_H3_SWAP_AI / _CN
-//   通用：    RUNNINGHUB_WORKFLOW_HAILUO_H3_SWAP（两个站点同一个 id 时才这么写）
-//   config：  runninghubWorkflows["hailuo-h3-swap"] = "123"  或  { "cn": "123", "ai": "456" }
-function workflowEnvBase(workflow) {
-  return `RUNNINGHUB_WORKFLOW_${String(workflow.key).toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`;
-}
-
-// 给管理面板显示用：这个站点该填哪个变量名。
-export function workflowEnvNames(workflow, site) {
-  return `${workflowEnvBase(workflow)}_${site.toUpperCase()}`;
-}
-
+// 登记在 shared/runninghub-workflows.json（进 git），shared/runninghub.ts 按 key 把它挂到 workflowId 上。
+// 不用环境变量：工作流多了，一份能看、能 diff 的登记表比一堆变量好维护。
 const idFrom = (value, site) => {
   if (!value) return '';
   if (typeof value === 'string') return value.trim();
@@ -380,16 +371,15 @@ const idFrom = (value, site) => {
   return '';
 };
 
+// 给管理面板显示用：这个站点在登记表里该填哪一行。
+export function workflowIdPath(workflow, site) {
+  return `shared/runninghub-workflows.json → workflows.${workflow.key}.ids.${site}`;
+}
+
 export function resolveWorkflowId(workflow, site = RUNNINGHUB.site) {
   if (!workflow) return '';
   const wanted = rhSiteOf(site) || RUNNINGHUB.site;
-  const base = workflowEnvBase(workflow);
-  return (
-    String(process.env[`${base}_${wanted.toUpperCase()}`] || '').trim() ||
-    String(process.env[base] || '').trim() ||
-    idFrom(config.runninghubWorkflows?.[workflow.key], wanted) ||
-    idFrom(workflow.workflowId, wanted)
-  );
+  return idFrom(workflow.workflowId, wanted);
 }
 
 // 两个站点各自的 id，管理面板和目录都用它。
@@ -653,14 +643,33 @@ export async function uploadMedia(lease, { buffer, filename, contentType }) {
 }
 
 // ---------- 提交 ----------
-// 优先走 V2（/openapi/v2/run/workflow/{id}，扁平返回）。这个端点在文档里没有单列，
-// 万一哪天没了就退回文档主推的 V1（/task/openapi/create，要 body 里再带一份 apiKey）。
-export async function submitWorkflow(lease, workflowId, nodeInfoList, { instanceType = 'default', retainSeconds = 0 } = {}) {
-  const extra = { instanceType, ...(retainSeconds > 0 ? { retainSeconds } : {}) };
+// 优先走 V2。两类端点共用一条链路，差别在 URL 和请求体：
+//   workflow → /openapi/v2/run/workflow/{workflowId}，nodeInfoList 的值保持原类型；
+//   ai-app   → /openapi/v2/run/ai-app/{appId}，官方示例里每个 fieldValue 都是字符串、带 description:null，
+//              另外还要带 usePersonalQueue。
+// 普通工作流万一 V2 没了，还能退回文档主推的 V1（/task/openapi/create，body 里再带一份 apiKey）。
+export async function submitWorkflow(lease, workflowId, nodeInfoList, { instanceType = 'default', retainSeconds = 0, endpoint = 'workflow' } = {}) {
+  const aiApp = endpoint === 'ai-app';
+  // 照平台生成的示例 curl 发：AI 应用的值一律字符串，连数字也是（"1080" 而不是 1080）。
+  const nodes = aiApp
+    ? nodeInfoList.map((item) => ({ nodeId: item.nodeId, fieldName: item.fieldName, fieldValue: String(item.fieldValue), description: null }))
+    : nodeInfoList;
+  const extra = {
+    instanceType,
+    ...(retainSeconds > 0 ? { retainSeconds } : {}),
+    // 文档表格写 Boolean，但平台自己生成的示例 curl 是字符串 "false"——跟着实测过的样例走。
+    ...(aiApp ? { usePersonalQueue: 'false' } : {}),
+  };
+  const pathname = aiApp
+    ? `/openapi/v2/run/ai-app/${encodeURIComponent(workflowId)}`
+    : `/openapi/v2/run/workflow/${encodeURIComponent(workflowId)}`;
   let payload;
   try {
-    payload = await call(lease, { path: `/openapi/v2/run/workflow/${encodeURIComponent(workflowId)}`, json: { nodeInfoList, ...extra } });
+    payload = await call(lease, { path: pathname, json: { nodeInfoList: nodes, ...extra } });
   } catch (err) {
+    // AI 应用**不能**退回 V1：/task/openapi/ai-app/run 要 webappId 是 integer，
+    // 而 19 位的 appId 超过 Number.MAX_SAFE_INTEGER，转成数字会丢精度、指到另一个应用上。
+    if (aiApp) throw err;
     const fallback = err.status === 404 || err.status === 500 || err.code === 'runninghub_412';
     if (!fallback) throw err;
     payload = await call(lease, { path: '/task/openapi/create', json: { apiKey: lease.key, workflowId, nodeInfoList, addMetadata: false, ...extra } });

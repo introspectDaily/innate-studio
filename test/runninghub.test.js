@@ -2,7 +2,8 @@
 
 import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { drop, parseAccountStatus, parseKeys, pick, rankKeys, resolveWorkflowId, resolveWorkflowIds, rhBaseUrl, rhKeyState } from '../server/runninghub.js';
+import fs from 'node:fs';
+import { drop, parseAccountStatus, parseKeys, pick, rankKeys, resolveWorkflowId, resolveWorkflowIds, rhBaseUrl, rhKeyState, submitWorkflow, workflowIdPath } from '../server/runninghub.js';
 import { RH_WORKFLOWS, rhCost, rhMachines, rhMedia, rhPlan, rhRules, rhSiteOf, rhWorkflow, rhUuid } from '../shared/runninghub.ts';
 import { flowInputs, flowVideoSpec, formValues } from '../shared/autodl.ts';
 
@@ -65,20 +66,28 @@ test('请求地址按站点走：国内站 .cn、海外站 .ai', () => {
   assert.equal(rhBaseUrl(''), 'https://www.runninghub.cn');
 });
 
-test('工作流 ID 按站点取：分站变量 > 通用变量 > 登记表里按站点写的对象', () => {
+test('工作流 ID 按站点取：只看工作流上的 workflowId，不读环境变量', () => {
   const workflow = { key: 'demo-flow', name: '演示', summary: '', kind: 'video', workflowId: { cn: '111', ai: '222' } };
   assert.equal(resolveWorkflowId(workflow, 'cn'), '111');
   assert.equal(resolveWorkflowId(workflow, 'ai'), '222');
   assert.deepEqual(resolveWorkflowIds(workflow), { cn: '111', ai: '222' });
-  // 通用变量盖住两个站，分站变量再盖住自己那一站。
+  // 旧的环境变量不再生效：设了也不会盖住登记表里的值。
   process.env.RUNNINGHUB_WORKFLOW_DEMO_FLOW = '999';
-  assert.equal(resolveWorkflowId(workflow, 'cn'), '999');
-  assert.equal(resolveWorkflowId(workflow, 'ai'), '999');
-  process.env.RUNNINGHUB_WORKFLOW_DEMO_FLOW_AI = '888';
-  assert.equal(resolveWorkflowId(workflow, 'ai'), '888');
-  assert.equal(resolveWorkflowId(workflow, 'cn'), '999');
-  delete process.env.RUNNINGHUB_WORKFLOW_DEMO_FLOW;
-  delete process.env.RUNNINGHUB_WORKFLOW_DEMO_FLOW_AI;
+  try {
+    assert.equal(resolveWorkflowId(workflow, 'cn'), '111');
+  } finally {
+    delete process.env.RUNNINGHUB_WORKFLOW_DEMO_FLOW;
+  }
+});
+
+test('工作流 ID 登记表：每个工作流都有一行，缺的站点列出登记表里该填的位置', () => {
+  const registry = JSON.parse(fs.readFileSync(new URL('../shared/runninghub-workflows.json', import.meta.url), 'utf8'));
+  for (const workflow of RH_WORKFLOWS) {
+    assert.ok(registry.workflows[workflow.key], `登记表缺少 ${workflow.key}`);
+  }
+  // 没配好时，管理面板告诉人去改登记表的哪一行。
+  assert.equal(workflowIdPath({ key: 'hailuo-h3-swap' }, 'cn'), 'shared/runninghub-workflows.json → workflows.hailuo-h3-swap.ids.cn');
+  assert.equal(rhWorkflow('text-to-image').workflowId.ai, registry.workflows['text-to-image'].ids.ai);
 });
 
 test('挑 Key 按站点过滤：只有配了该工作流 ID 的站点才接单', async () => {
@@ -510,4 +519,125 @@ test('页面那套函数（表单初始值、拼入参、视频节点的参数�
   assert.deepEqual(spec.resolutions, []);
   assert.deepEqual(spec.durations, []);
   assert.deepEqual(spec.frames, []);
+});
+
+// ---------- AI 应用（文生图）：和 ComfyUI 工作流是两类端点 ----------
+const T2I = rhWorkflow('text-to-image');
+const t2iValue = (plan, nodeId, field) => plan.nodeInfoList.find((item) => item.nodeId === nodeId && item.fieldName === field)?.fieldValue;
+
+test('登记表：文生图是 AI 应用，只在海外站有 ID，只收提示词不收素材', () => {
+  assert.ok(T2I);
+  assert.equal(T2I.endpoint, 'ai-app');
+  assert.equal(T2I.kind, 'image');
+  assert.equal(T2I.workflowId.ai, '2083580194556071937');
+  assert.equal(T2I.workflowId.cn, undefined);
+  assert.deepEqual(rhMedia(T2I), []);
+  assert.deepEqual(rhMachines(T2I).map((machine) => machine.value), ['default']);
+  const rules = rhRules(T2I);
+  assert.equal(rules.prompt.required, true);
+  assert.equal(rules.width.default, 1080);
+  assert.equal(rules.height.default, 1920);
+  assert.equal(rules.batch_size.default, 1);
+  // 种子不给固定默认值，留空交给服务端随机器生成。
+  assert.equal(rules.seed.default, undefined);
+  assert.equal(rhCost('text-to-image', {}), 0.1);
+});
+
+test('文生图：五个节点参数照官方 curl 登记，种子每次随机且可复现', () => {
+  const plan = rhPlan(T2I, { prompt: 'a girl in a study room' });
+  assert.deepEqual(plan.problems, []);
+  assert.deepEqual(plan.uploads, []);
+  assert.deepEqual(plan.nodeInfoList.map((item) => `${item.nodeId}.${item.fieldName}`), ['5.text', '7.width', '7.height', '6.seed', '7.batch_size']);
+  assert.equal(t2iValue(plan, '5', 'text'), 'a girl in a study room');
+  assert.equal(t2iValue(plan, '7', 'width'), 1080);
+  assert.equal(t2iValue(plan, '7', 'height'), 1920);
+  assert.equal(t2iValue(plan, '7', 'batch_size'), 1);
+  const seed = t2iValue(plan, '6', 'seed');
+  assert.ok(Number.isInteger(seed) && seed >= 0 && seed <= 999999999999999);
+  assert.equal(plan.inputs.seed, seed); // 记录里留着，能照着复现
+
+  // 不填种子时两次调用不该出同一个数（写死默认值会导致每次都出同一张图）。
+  assert.notEqual(t2iValue(rhPlan(T2I, { prompt: 'x' }), '6', 'seed'), t2iValue(rhPlan(T2I, { prompt: 'x' }), '6', 'seed'));
+  // 用户填了就照填的来，包括 0。
+  assert.equal(t2iValue(rhPlan(T2I, { prompt: 'x', seed: 527633149753192 }), '6', 'seed'), 527633149753192);
+  assert.equal(t2iValue(rhPlan(T2I, { prompt: 'x', seed: 0 }), '6', 'seed'), 0);
+  // 提示词是唯一必填项。
+  assert.ok(rhPlan(T2I, {}).problems.some((problem) => problem.includes('画面描述')));
+  // 改尺寸也生效。
+  const custom = rhPlan(T2I, { prompt: 'x', width: 1024, height: 1536, batch_size: 2, seed: 1 });
+  assert.equal(t2iValue(custom, '7', 'width'), 1024);
+  assert.equal(t2iValue(custom, '7', 'height'), 1536);
+  assert.equal(t2iValue(custom, '7', 'batch_size'), 2);
+});
+
+// 提交接口用假的 fetch 拦下来，只检查发出去的 URL 和请求体，不真打平台。
+const okSubmit = () => new Response(
+  JSON.stringify({ taskId: '2013508786110730241', status: 'RUNNING', errorCode: '', errorMessage: '', results: null }),
+  { status: 200, headers: { 'content-type': 'application/json' } },
+);
+const lease = { key: 'rh-test-00000000', site: 'ai' };
+
+test('AI 应用提交：打到 /run/ai-app/{appId}，字段值全字符串、带 description 与 usePersonalQueue', async () => {
+  const seen = [];
+  mock.method(globalThis, 'fetch', async (url, init) => {
+    seen.push({ url: String(url), init });
+    return okSubmit();
+  });
+  try {
+    const plan = rhPlan(T2I, { prompt: 'a girl', seed: 527633149753192 });
+    const out = await submitWorkflow(lease, '2083580194556071937', plan.nodeInfoList, { endpoint: 'ai-app' });
+    assert.equal(out.taskId, '2013508786110730241');
+    assert.equal(seen.length, 1);
+    assert.ok(seen[0].url.endsWith('/openapi/v2/run/ai-app/2083580194556071937'));
+    assert.equal(seen[0].init.headers.Authorization, 'Bearer rh-test-00000000');
+    const body = JSON.parse(seen[0].init.body);
+    assert.equal(body.instanceType, 'default');
+    // 官方示例 curl 用的是字符串 "false"（文档表格写 Boolean，跟着实测样例走）。
+    assert.equal(body.usePersonalQueue, 'false');
+    assert.equal(body.nodeInfoList.length, 5);
+    assert.ok(body.nodeInfoList.every((item) => typeof item.fieldValue === 'string'));
+    assert.ok(body.nodeInfoList.every((item) => item.description === null));
+    assert.equal(body.nodeInfoList.find((item) => item.fieldName === 'width').fieldValue, '1080');
+    assert.equal(body.nodeInfoList.find((item) => item.fieldName === 'seed').fieldValue, '527633149753192');
+    assert.equal(body.nodeInfoList.find((item) => item.fieldName === 'text').fieldValue, 'a girl');
+  } finally {
+    mock.restoreAll();
+  }
+});
+
+test('AI 应用不退回 V1：19 位 appId 转成数字会丢精度', async () => {
+  const seen = [];
+  mock.method(globalThis, 'fetch', async (url) => {
+    seen.push(String(url));
+    return new Response('not found', { status: 404 });
+  });
+  try {
+    await assert.rejects(() => submitWorkflow(lease, '2083580194556071937', [{ nodeId: '5', fieldName: 'text', fieldValue: 'x' }], { endpoint: 'ai-app' }));
+    assert.equal(seen.length, 1); // 没有第二次 /task/openapi/ai-app/run
+    assert.ok(seen[0].includes('/run/ai-app/'));
+  } finally {
+    mock.restoreAll();
+  }
+});
+
+test('普通工作流提交保持原样：数字仍是数字、不带 description / usePersonalQueue，V2 挂了还能退 V1', async () => {
+  const seen = [];
+  mock.method(globalThis, 'fetch', async (url, init) => {
+    seen.push({ url: String(url), body: init.body ? JSON.parse(init.body) : null });
+    if (seen.length === 1) return new Response('not found', { status: 404 });
+    return new Response(JSON.stringify({ code: 0, msg: 'success', data: { taskId: 'v1-task' } }), { status: 200, headers: { 'content-type': 'application/json' } });
+  });
+  try {
+    const out = await submitWorkflow(lease, '123', [{ nodeId: '7', fieldName: 'width', fieldValue: 1080 }]);
+    assert.equal(out.taskId, 'v1-task');
+    assert.equal(seen.length, 2);
+    assert.ok(seen[0].url.endsWith('/openapi/v2/run/workflow/123'));
+    assert.equal(seen[0].body.nodeInfoList[0].fieldValue, 1080);
+    assert.equal(seen[0].body.usePersonalQueue, undefined);
+    assert.equal(seen[0].body.nodeInfoList[0].description, undefined);
+    assert.ok(seen[1].url.endsWith('/task/openapi/create'));
+    assert.equal(seen[1].body.workflowId, '123');
+  } finally {
+    mock.restoreAll();
+  }
 });

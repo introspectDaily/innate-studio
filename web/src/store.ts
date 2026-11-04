@@ -172,8 +172,13 @@ export const flowSummary = (model?: string | null) => (isFlowModel(model) ? stat
 export const flowModelLabel = (model: string) => flowSummary(model)?.name || flowUuidOf(model);
 // 这个类型的节点能用哪些工作流：看出什么文件（video、audio、image）和有没有拿到规则。
 export const flowModelsOf = (kind: Kind) => state.flows.items.filter((item) => item.output === kind && item.rules && Object.keys(item.rules).length).map((item) => flowModelId(item.uuid));
+// 页面上写「来自 RunningHub / AutoDL」：平台的价格是它自己的单位（RH 币、元），不换算成积分，所以只说来源。
+export const flowSource = (provider?: string) => (provider === 'runninghub' ? 'RunningHub' : 'AutoDL');
 // 模型菜单里那行小字：这个工作流是哪一家的。
-export const flowHint = (model: string) => (flowSummary(model)?.provider === 'runninghub' ? 'RunningHub 工作流' : 'AutoDL 工作流');
+export const flowHint = (model: string) => {
+  const flow = flowSummary(model);
+  return flow?.provider === 'runninghub' ? (flow.endpoint === 'ai-app' ? 'RunningHub AI 应用' : 'RunningHub 工作流') : 'AutoDL 工作流';
+};
 // 工作流平台配好了（AutoDL.art 的令牌、或者 RunningHub 的一组 Key 里有能用的）。
 // 管理员直接看 state，成员只能看目录接口给的 hasKey。
 export const flowReady = () => Boolean(state.app.autodl?.hasKey || state.app.runninghub?.hasKey || state.flows.hasKey);

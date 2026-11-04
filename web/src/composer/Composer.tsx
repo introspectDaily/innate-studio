@@ -2,7 +2,7 @@
 // 状态和动作在 state.ts。
 
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { state, useStore, KINDS, goTo, loadCharacters, canManage, usesCredits, modelOption, loadFlows, flowReady, hasAnyKey } from '../store.ts';
+import { state, useStore, KINDS, goTo, loadCharacters, canManage, usesCredits, modelOption, loadFlows, flowReady, hasAnyKey, flowModelsOf, flowModelLabel, flowHint, flowSource } from '../store.ts';
 import { IMAGE_QUALITY_LABELS, modelLabel, modelNote, REFERENCE_MODE_LABEL, SPEECH_MODEL, AUDIO_MODEL } from '../../../shared/models.ts';
 import { ruleKind, ruleLabel, type InputRule } from '../../../shared/autodl.ts';
 import { musicSeconds } from '../request.ts';
@@ -15,6 +15,7 @@ import { MediaTile, AddTile } from '../ui/tiles.tsx';
 import { openAdmin } from '../settings.tsx';
 import { fmtCredits } from '../format.ts';
 import { SkillPanel } from '../skills.tsx';
+import { TaskStrip } from '../history.tsx';
 import type { FlowSummary, Kind, Ref, VideoForm } from '../types.ts';
 import {
   composer, RATIOS,
@@ -23,6 +24,7 @@ import {
   voiceName, voiceNote, togglePreview, setVoiceFilter, pickVoice, stopPreview, useCharacter, activeSkill, setSkill,
   addableKinds, mediaRoom, usedMediaUrls, addMedia, addFiles, dismissSubmitError, refLimitOf,
   flowDefinition, flowSlots, flowPrimaryKey, pickFlow, setFlowValue, setFlowRef, loadFlowDefinition,
+  setImageModel, imageFlowModel,
 } from './state.ts';
 
 type Mode = { value: VideoForm['mode']; label: string; icon: IconName; note: string };
@@ -356,14 +358,43 @@ function ImageFramePanel() {
 }
 
 function ImageToolbar() {
+  useStore('flows');
+  useFlowDefinition();
   const sub = composer.studio.image;
   const known = state.catalog.image;
-  const models = known.includes(sub.model) || !known.length ? known : [sub.model, ...known];
+  // 出图工作流和图片型号并列：画布的图片节点也是这么列的。工作流用自己规则里的宽高/张数/种子，
+  // 所以选中它时把「比例」「数量」换成「参数」面板。
+  const flows = flowModelsOf('image');
+  const isFlow = Boolean(imageFlowModel());
+  const models = [...new Set([...(known.includes(sub.model) || !known.length ? known : [sub.model, ...known]), ...flows])];
+  const more = isFlow
+    ? Object.entries(flowDefinition()?.input_rules || {}).filter(([key, rule]) => ruleKind(rule) !== 'media' && key !== flowPrimaryKey())
+    : [];
   return (
     <>
-      <Dropdown key="image-model" variant="tool" control="model" icon="cube" label="模型" value={sub.model} options={(models.length ? models : [sub.model]).map((m) => modelOption(m, modelLabel(m)))} onChange={(model) => updateStudio('image', { model })} />
-      <ImageRatioButton key="image-ratio" />
-      <Dropdown key="count" variant="tool" control="count" icon="layers" label="数量" value={String(sub.count)} options={IMAGE_COUNTS.map((n) => ({ value: String(n), label: `${n} 张` }))} onChange={(value) => updateStudio('image', { count: Number(value) })} />
+      <Dropdown
+        key="image-model"
+        variant="tool"
+        control="model"
+        icon="cube"
+        label="模型"
+        value={sub.model}
+        options={(models.length ? models : [sub.model]).map((m) => {
+          const flow = flows.includes(m);
+          return modelOption(m, flow ? flowModelLabel(m) : modelLabel(m), flow ? flowHint(m) : null);
+        })}
+        onChange={setImageModel}
+      />
+      {!isFlow && <ImageRatioButton key="image-ratio" />}
+      {!isFlow && (
+        <Dropdown key="count" variant="tool" control="count" icon="layers" label="数量" value={String(sub.count)} options={IMAGE_COUNTS.map((n) => ({ value: String(n), label: `${n} 张` }))} onChange={(value) => updateStudio('image', { count: Number(value) })} />
+      )}
+      {isFlow && more.length > 0 && (
+        <PanelButton name="more" label="参数" className="more-popover" panel={() => <FlowMorePanel fields={more} />}>
+          <Icon name="sliders" />
+          <span>参数</span>
+        </PanelButton>
+      )}
     </>
   );
 }
@@ -661,9 +692,10 @@ function FlowPicker({ onPick }: { onPick: (uuid: string) => void }) {
                 <div className="pick-name ellipsis">{item.name}</div>
                 {item.description && <div className="pick-desc">{item.description}</div>}
                 <div className="pick-badges">
-                  <span className="badge badge-pending">{item.fromCredits != null ? `起 ${item.fromCredits} 积分` : '按量计费'}</span>
+                  <span className="badge badge-pending">{`来自 ${flowSource(item.provider)}`}</span>
                   {needs && <span className="badge badge-ok">{needs}</span>}
-                  {item.provider === 'runninghub' && <span className="badge badge-ok">RunningHub</span>}
+                  {item.output === 'image' && <span className="badge badge-ok">出图</span>}
+                  {item.endpoint === 'ai-app' && <span className="badge badge-ok">AI 应用</span>}
                 </div>
               </button>
             );
@@ -786,7 +818,7 @@ function FlowToolbar() {
   }
   const items = state.flows.items;
   const known = items.some((item) => item.uuid === flow.workflow?.uuid);
-  const options = [...(flow.workflow && !known ? [{ value: flow.workflow.uuid, label: flow.workflow.name }] : []), ...items.map((item) => ({ value: item.uuid, label: item.name, note: item.fromCredits != null ? `起 ${item.fromCredits} 积分` : undefined }))];
+  const options = [...(flow.workflow && !known ? [{ value: flow.workflow.uuid, label: flow.workflow.name }] : []), ...items.map((item) => ({ value: item.uuid, label: item.name, note: `来自 ${flowSource(item.provider)}` }))];
   const rules = definition?.input_rules || {};
   // 工具栏上只放时长和分辨率这种常改的（登记成滑块的参数也是时长性质，一并提上来）；
   // 其余（模式、开关、种子、数字）在「参数」面板里。
@@ -875,14 +907,18 @@ function FlowMorePanel({ fields }: { fields: [string, InputRule][] }) {
 }
 
 function SendArea() {
-  // 工作流用的是 AutoDL.art 的令牌，其余内容用的是火山方舟的 Key。
-  const needsKey = composer.studio.type === 'flow' ? !flowReady() : !state.app.hasKey;
+  // 工作流用的是 AutoDL.art / RunningHub 的 Key，其余内容用火山方舟的 Key。
+  // 「图片」里选的出图工作流（或者压根没有普通图片型号、只有出图工作流）也归前者管：
+  // 只配了 RunningHub 的账号不该被提示去配火山 Key。
+  const imageViaFlow = composer.studio.type === 'image' && (!state.catalog.image.length || Boolean(imageFlowModel()));
+  const viaFlow = composer.studio.type === 'flow' || imageViaFlow;
+  const needsKey = viaFlow ? !flowReady() : !state.app.hasKey;
   if (needsKey) {
     // 多人模式下 Key 由管理员配，成员只能等。
     if (!canManage()) return <span className="composer-hint">服务暂未开通</span>;
     return (
       <button className="btn btn-primary btn-sm" type="button" onClick={openAdmin}>
-        {composer.studio.type === 'flow' ? '设置 AutoDL.art 令牌' : '设置 API Key'}
+        {viaFlow ? '设置工作流平台 Key' : '设置 API Key'}
       </button>
     );
   }
@@ -961,7 +997,7 @@ function SubmitNotice() {
 }
 
 export function Composer() {
-  useStore('composer', 'app', 'balance');
+  useStore('composer', 'app', 'balance', 'models');
   const { studio } = composer;
   const type = typeOf();
   // 工作流的主文本（提示词、朗读文本）也写在大文本框里；没有文字参数的工作流不显示它。
@@ -1031,10 +1067,11 @@ export function Composer() {
     if (resizing.current?.playState !== 'running') settledHeight.current = card.current!.offsetHeight;
   });
 
-  // 读到模型列表后，没有可用模型的类型不能选。工作流看的是 AutoDL.art 的令牌和工作流目录。
+  // 读到模型列表后，没有可用模型的类型不能选。图片除了普通图片型号，出图工作流也算；
+  // 工作流看的是 AutoDL.art / RunningHub 的令牌和目录。
   const { known, image } = state.catalog;
   const missing: Record<string, boolean> = {
-    image: Boolean(known && !image.length),
+    image: Boolean(known && !image.length && !flowModelsOf('image').length),
     // 出错（比如平台临时超时）时不禁用，让人能进去点刷新重试。
     flow: !flowReady() || Boolean(state.flows.loaded && !state.flows.error && !state.flows.items.length),
   };
@@ -1128,6 +1165,7 @@ export function Composer() {
         </div>
       </div>
       <SubmitNotice />
+      <TaskStrip />
     </section>
   );
 }

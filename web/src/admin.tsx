@@ -577,7 +577,7 @@ interface RhPool {
   routing?: { byCoins: boolean; refreshMs: number };
   sites: { site: string; label: string; host: string; keys: number; concurrency: number; coins?: number | null }[];
   keys: RhKeyInfo[];
-  workflows: { key: string; name: string; kind: string; ids: Record<string, string>; ready: boolean; missing: string[] }[];
+  workflows: { key: string; name: string; kind: string; endpoint?: string; ids: Record<string, string>; ready: boolean; missing: string[] }[];
 }
 
 // 站点标签：老版服务端没有 sites 字段时兜底。
@@ -704,6 +704,7 @@ function RunninghubKeys() {
           <div className="rh-pool-flows">
             {pool.workflows.map((workflow) => (
               <div className="rh-pool-flow" key={workflow.key}>
+                {workflow.endpoint === 'ai-app' && <span className="badge badge-ok" title="AI 应用：提交到 /openapi/v2/run/ai-app/{appId}，这里的 ID 是应用 ID">AI 应用</span>}
                 <span className="rh-pool-title ellipsis">{workflow.name}</span>
                 {workflow.ready ? (
                   <span className="mono muted">{sites.map((site) => `${site.label} ${workflow.ids?.[site.site] || '未配'}`).join(' · ')}</span>

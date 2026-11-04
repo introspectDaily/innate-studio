@@ -1,0 +1,24 @@
+{
+  "$comment": "RunningHub 工作流 ID 登记表，随代码进 git。新增或换 ID 只改这里，不用配环境变量。key 对应 shared/runninghub.ts 里 RH_WORKFLOWS 的 key。ids 按站点填：cn 是国内站 runninghub.cn，ai 是海外站 runninghub.ai；两站同一个 ID 就两个都填。留空的站点不接单。endpoint 是 ai-app 的工作流，这里填的是 AI 应用 id（webappId）。",
+  "workflows": {
+    "hailuo-h3-swap": {
+      "ids": {
+        "cn": "",
+        "ai": ""
+      },
+      "note": "ComfyUI 工作流，在 RunningHub 上「保存并导出 API」后把工作流 ID 填进来。"
+    },
+    "text-to-image": {
+      "ids": {
+        "ai": "2083580194556071937"
+      },
+      "note": "AI 应用 appId（海外站示例）。国内站要另存一份应用后再填 cn。"
+    },
+    "hailuo-h3-swap-9": {
+      "ids": {
+        "ai": "2116808527745449985"
+      },
+      "note": "ComfyUI 工作流 v1.7（1~9 张参考图），海外站的 ID。国内站的 ID 另存后填 cn。"
+    }
+  }
+}

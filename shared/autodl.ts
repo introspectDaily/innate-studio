@@ -264,6 +264,37 @@ export function ruleKind(rule: InputRule): 'text' | 'textarea' | 'number' | 'tog
   return 'media';
 }
 
+// ---------- 生成详情里的参数怎么摆 ----------
+// 参数是三列小格（名称在上、取值在下）。提示词这类长文本塞进 1/3 列会被挤成一条竖线，
+// 所以文本域、或者明显偏长的取值要独占一行；详情上方已经有全宽的「提示词」区块，
+// 和它一字不差的那份参数就不必再列一遍。
+const LONG_PARAM_CHARS = 60;
+export const isLongParam = (text: string): boolean => text.length > LONG_PARAM_CHARS || text.includes('\n');
+// 只有独占一行的文本才限高；型号名虽然独占一行，但短，不需要滚动。
+export const paramIsLong = (wide?: boolean, value?: unknown): boolean => Boolean(wide) && typeof value === 'string' && isLongParam(value);
+
+export type FlowDisplayParam = [name: string, value: string, wide?: boolean];
+
+export function flowDisplayParams(
+  payload: Record<string, unknown> = {},
+  rules: Record<string, InputRule> = {},
+  prompt = '',
+): FlowDisplayParam[] {
+  const main = prompt.trim();
+  const entries: FlowDisplayParam[] = [];
+  for (const [key, raw] of Object.entries(payload || {})) {
+    const rule: InputRule = rules[key] || { type: 'string' };
+    const kind = ruleKind(rule);
+    // 素材在「参考素材」那一组里看，不在这儿重复。
+    if (kind === 'media') continue;
+    const text = typeof raw === 'boolean' ? (raw ? '开' : '关') : String(raw ?? '');
+    const isText = rule.type === 'string' || rule.type === 'prompt';
+    if (isText && main && text.trim() === main) continue;
+    entries.push([ruleLabel(rule, key), text, kind === 'textarea' || isLongParam(text)]);
+  }
+  return entries;
+}
+
 // ---------- 工作流当成一种「模型」 ----------
 // 画布节点和模型菜单里，工作流和 Seedance、MiniMax 这些型号并列出现。id 加个前缀，免得和工作流自己的 uuid、别的平台的型号混在一起。
 export const FLOW_MODEL_PREFIX = 'flow:';

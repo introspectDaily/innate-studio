@@ -263,11 +263,12 @@ export interface FlowSummary {
   output?: Kind;
   // 计费配置，页面预估花费用。
   billing?: { price_type?: string; billing_config?: Record<string, any>; price?: number };
-  fromCredits?: number | null;
   usage?: number;
   rules?: Record<string, import('../../shared/autodl.ts').InputRule>;
   // 'runninghub' 时提交走 /api/runninghub/submit，其余走 /api/autodl/submit。
   provider?: string;
+  // RunningHub 的端点类型：'workflow'（ComfyUI 工作流）/ 'ai-app'（平台包装过的 AI 应用）。
+  endpoint?: string;
   // RunningHub 的机器档位（instanceType）。其余工作流没有这一项。
   machines?: { value: string; label: string; note: string }[];
   // 提示词里「@图片 1」在提交前换成什么写法（模板里的 {n} 是序号）。没有就用「图1」。

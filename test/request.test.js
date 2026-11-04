@@ -2,7 +2,10 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildVideoRequest, refsInUse, carryRefs, buildImageRequest, buildSpeechRequest, buildSfxRequest, buildMusicRequest } from '../web/src/request.ts';
+import { buildVideoRequest, refsInUse, carryRefs, buildImageRequest, buildSpeechRequest, buildSfxRequest, buildMusicRequest, buildFlowInputs, buildImageFlowInputs } from '../web/src/request.ts';
+import { state, flowModelsOf } from '../web/src/store.ts';
+import { flowModelId } from '../shared/autodl.ts';
+import { rhRules, rhUuid, rhWorkflow } from '../shared/runninghub.ts';
 
 const baseForm = (patch = {}) => ({
   mode: 'text',
@@ -157,4 +160,50 @@ test('必须写提示词的模型（MiniMax H3）：只给素材不行，首尾�
   assert.equal('generate_audio' in framed.payload, false);
   assert.deepEqual(buildVideoRequest(baseForm({ mode: 'reference', prompt: '', refs: { image: [local('/media/uploads/a.png')], video: [], audio: [] } }), h3).problems, ['请输入提示词']);
   assert.deepEqual(buildVideoRequest(baseForm({ mode: 'reference', prompt: '跳舞', refs: { image: [local('/media/uploads/a.png')], video: [], audio: [] } }), h3).problems, []);
+});
+
+// ---------- 创作页「图片」里的出图工作流 ----------
+// 文生图（AI 应用）输出 image，应该和普通图片型号一起出现在图片类型的模型菜单里；
+// 提交时提示词来自图片表单的主文本框，宽高/种子/张数来自工作流的参数面板。
+
+test('出图工作流按 output 进图片类型的模型菜单，视频工作流不进', () => {
+  const image = rhWorkflow('text-to-image');
+  const video = rhWorkflow('hailuo-h3-swap');
+  const before = state.flows.items;
+  try {
+    state.flows.items = [
+      { uuid: 'autodl-video', output: 'video', rules: { prompt: { type: 'prompt' } } },
+      { uuid: rhUuid(image.key), output: image.kind, rules: rhRules(image), provider: 'runninghub', endpoint: image.endpoint },
+      { uuid: rhUuid(video.key), output: video.kind, rules: rhRules(video), provider: 'runninghub' },
+    ];
+    assert.deepEqual(flowModelsOf('image'), [flowModelId(rhUuid(image.key))]);
+    assert.deepEqual(flowModelsOf('video'), [flowModelId('autodl-video'), flowModelId(rhUuid(video.key))]);
+  } finally {
+    state.flows.items = before;
+  }
+});
+
+test('图片表单 → 文生图工作流：提示词来自主文本框，参数转成数字，缺的补默认值', () => {
+  const rules = rhRules(rhWorkflow('text-to-image'));
+  const form = { values: { width: '1024', height: '1536', batch_size: '2', seed: '' }, refs: {} };
+  const built = buildImageFlowInputs(rules, { prompt: '  雪夜里的猫  ', refs: [] }, form, 'prompt');
+  assert.deepEqual(built.problems, []);
+  assert.equal(built.payload.prompt, '雪夜里的猫');
+  assert.equal(built.payload.width, 1024);
+  assert.equal(built.payload.height, 1536);
+  assert.equal(built.payload.batch_size, 2);
+  // 种子留空：服务端现生成随机数并记在记录里，想复现再填回来。
+  assert.equal('seed' in built.payload, false);
+  // 技能扩写：发出去的是扩写后的文字，输入框里的原话不进请求。
+  assert.equal(buildImageFlowInputs(rules, { prompt: '原文', refs: [] }, form, 'prompt', '扩写后的画面描述').payload.prompt, '扩写后的画面描述');
+  // 没写提示词、或者往文生图里塞参考图，都在提交前拦住。
+  assert.match(buildImageFlowInputs(rules, { prompt: '  ', refs: [] }, form, 'prompt').problems[0], /画面描述/);
+  assert.match(buildImageFlowInputs(rules, { prompt: '猫', refs: [local('/media/a.png')] }, form, 'prompt').problems[0], /文生图/);
+});
+
+test('工作流表单本身：数字转数字、空值补登记表默认值', () => {
+  const rules = rhRules(rhWorkflow('text-to-image'));
+  const built = buildFlowInputs(rules, { values: { prompt: '猫', width: '768', seed: '42' }, refs: {} });
+  assert.deepEqual(built.problems, []);
+  assert.deepEqual(built.inputs, { prompt: '猫', width: 768, height: 1920, seed: 42, batch_size: 1 });
 });

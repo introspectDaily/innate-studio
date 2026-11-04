@@ -1,6 +1,7 @@
 // 把创作表单转成发给本地服务的请求。纯函数，不碰页面和网络，可以单独测试。
 // 视频的提示词是 prompt 字符串，首尾帧在 frame_images，参考素材在 input_references，本地服务把它换成平台（火山方舟、MiniMax）自己的格式再发出去。图片、语音、音效、配乐各有一个小函数。
 
+import { cleanInputs, ruleKind, type InputRule } from '../../shared/autodl.ts';
 import type { VideoSpec } from '../../shared/models.ts';
 import type { VideoForm, ImageForm, SpeechForm, SfxForm, MusicForm, Ref, BuiltRequest } from './types.ts';
 
@@ -106,6 +107,49 @@ export function buildImageRequest(form: ImageForm, refLimit = 0): BuiltRequest {
     payload.input_references = refs.map((ref) => ({ type: 'image_url', image_url: { url: ref.url } }));
   }
   return { payload, problems };
+}
+
+// ---------- 工作流：把表单按 input_rules 拼成入参 ----------
+// 两家工作流（AutoDL.art / RunningHub）共用这一套形状。纯函数，创作页和画布都用它。
+export type FlowFormValues = { values: Record<string, unknown>; refs: Record<string, Ref | null> };
+
+export function buildFlowInputs(rules: Record<string, InputRule>, form: FlowFormValues): { inputs: Record<string, unknown>; problems: string[] } {
+  const raw: Record<string, unknown> = {};
+  for (const [key, rule] of Object.entries(rules)) {
+    const kind = ruleKind(rule);
+    if (kind === 'media') {
+      const ref = form.refs[key];
+      if (ref) raw[key] = ref.url;
+    } else if (kind === 'number') {
+      const text = form.values[key];
+      if (text !== '' && text != null) raw[key] = Number(text);
+    } else if (kind === 'toggle') {
+      if (form.values[key] !== undefined) raw[key] = form.values[key];
+    } else if (kind === 'select') {
+      if (form.values[key]) raw[key] = form.values[key];
+    } else if (form.values[key] !== '' && form.values[key] != null) {
+      raw[key] = form.values[key];
+    }
+  }
+  return cleanInputs(rules, raw);
+}
+
+// 「图片」里选了出图工作流：提示词来自图片表单的主文本框（技能润色后传 promptOverride），
+// 参考图按规则里的 image 槽顺序填，其余参数（宽高、种子、张数、机器档位）来自工作流的参数面板。
+export function buildImageFlowInputs(rules: Record<string, InputRule>, image: Pick<ImageForm, 'prompt' | 'refs'>, form: FlowFormValues, primaryKey: string | null, promptOverride?: string): BuiltRequest {
+  const values = { ...form.values };
+  if (primaryKey) values[primaryKey] = String(promptOverride ?? image.prompt ?? '').trim();
+  const slots = Object.keys(rules).filter((key) => rules[key].type === 'image');
+  const picked = image.refs || [];
+  if (picked.length > slots.length)
+    return { payload: {}, problems: [slots.length ? `这个工作流最多支持 ${slots.length} 张参考图` : '这个工作流是文生图，不接受参考图'] };
+  const refs = { ...form.refs };
+  slots.forEach((key, index) => {
+    refs[key] = picked[index] || null;
+  });
+  // 和别的 build*Request 一样给 payload：提交链路取的是 request.payload 当 inputs。
+  const { inputs, problems } = buildFlowInputs(rules, { values, refs });
+  return { payload: inputs, problems };
 }
 
 export function buildSpeechRequest(form: SpeechForm): BuiltRequest {
