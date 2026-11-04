@@ -547,6 +547,7 @@ function AutodlKey() {
 // 所以每个 Key 旁边标出它属于哪个站，工作流也按站点分别显示配没配 id。
 // 「在跑」问的是 RunningHub 平台上的数（currentTaskCounts），不是本地计数：同一个 Key 可能还有别人在用，
 // 本地只知道自己派出去几单，会显得比实际空。平台没答上来的 Key 才退回本地数，并标一个「本地」。
+// 「余额」是同一个接口带回来的 remainCoins（RH 币）：派任务时优先用余额多的 Key，让各账号余额趋近。
 interface RhKeyInfo {
   title: string;
   hint: string;
@@ -558,6 +559,9 @@ interface RhKeyInfo {
   measured: 'platform' | 'local';
   localRunning: number;
   full: boolean;
+  // 老版服务端没有下面两个字段，所以都按可选处理。
+  coins?: number | null;
+  coinsMeasured?: 'platform' | 'cached' | 'unknown';
 }
 
 interface RhPool {
@@ -568,14 +572,18 @@ interface RhPool {
   total: number;
   concurrency: number;
   running: number;
-  live: { at: number; ok: boolean; error: string; ttl: number };
-  sites: { site: string; label: string; host: string; keys: number; concurrency: number }[];
+  live: { at: number; ok: boolean; coinsOk?: boolean; error: string; ttl: number };
+  coins?: { unit: string; at: number; known: number; unknown: number; total: number | null; min: number | null; max: number | null; spread: number | null };
+  routing?: { byCoins: boolean; refreshMs: number };
+  sites: { site: string; label: string; host: string; keys: number; concurrency: number; coins?: number | null }[];
   keys: RhKeyInfo[];
   workflows: { key: string; name: string; kind: string; ids: Record<string, string>; ready: boolean; missing: string[] }[];
 }
 
 // 站点标签：老版服务端没有 sites 字段时兜底。
 const RH_SITE_FALLBACK: Record<string, string> = { cn: '国内站', ai: '海外站' };
+// 余额可能没问到（null）或老服务端根本没给（undefined），两种都显示占位而不是报错。
+const fmtCoins = (value?: number | null) => (typeof value === 'number' ? value.toLocaleString('zh-CN', { maximumFractionDigits: 2 }) : '—');
 // 一页十个：和「设置 → Agent Keys」一样的分页，Key 多了不至于把弹窗拉成一长条。
 const RH_PAGE_SIZE = 10;
 
@@ -585,10 +593,11 @@ function RunninghubKeys() {
   const [busy, setBusy] = useState(false);
   const [page, setPage] = useState(1);
 
-  async function load(showToast = false) {
+  // force 是「刷新」按钮：跳过服务端的 20 秒缓存，立刻再问一次平台。
+  async function load(showToast = false, force = false) {
     setBusy(true);
     try {
-      setPool(await api<RhPool>('GET', '/api/runninghub/keys'));
+      setPool(await api<RhPool>('GET', force ? '/api/runninghub/keys?refresh=1' : '/api/runninghub/keys'));
       setError('');
       if (showToast) toast('已刷新', 'success');
     } catch (err) {
@@ -620,7 +629,7 @@ function RunninghubKeys() {
       <div className="form-label">
         RunningHub 密钥池
         <span className="form-desc">
-          ComfyUI 工作流（海螺 H3 人物替换等）用它。Key 配在环境变量 <span className="mono">{envName}</span> 指向的 JSON 文件里，支持多个、各带自己的并发数和站点（<span className="mono">site</span>：<span className="mono">cn</span> 国内站 / <span className="mono">ai</span> 海外站），一个占满就换下一个。下面的「在跑」是 RunningHub 平台上的数，别人用同一个 Key 跑的任务也算在内。
+          ComfyUI 工作流（海螺 H3 人物替换等）用它。Key 配在环境变量 <span className="mono">{envName}</span> 指向的 JSON 文件里，支持多个、各带自己的并发数和站点（<span className="mono">site</span>：<span className="mono">cn</span> 国内站 / <span className="mono">ai</span> 海外站）。下面的「在跑」是 RunningHub 平台上的数，别人用同一个 Key 跑的任务也算在内；「剩余」是各账号的 RH 币余额。派任务时优先用余额多的 Key，让各账号余额慢慢趋近（<span className="mono">RUNNINGHUB_ROUTE_BY_COINS=0</span> 可关掉，改回按并发轮转）。
         </span>
       </div>
       <div className="rh-pool">
@@ -638,6 +647,16 @@ function RunninghubKeys() {
             <span className="rh-pool-title ellipsis">{key.title}</span>
             <span className="badge badge-pending">{key.siteLabel || siteLabel(key.site)}</span>
             <span className="mono muted">{key.hint}</span>
+            <span
+              className={`badge rh-coins ${typeof key.coins !== 'number' ? 'badge-pending' : key.coins <= 0 ? 'badge-error' : 'badge-ok'}`}
+              title={
+                key.coinsMeasured === 'platform'
+                  ? 'RunningHub 平台刚返回的剩余 RH 币'
+                  : key.coinsMeasured === 'cached'
+                    ? '这轮没问到平台，显示的是上次查到的余额'
+                    : '还没问到这个 Key 的余额，路由会按其他 Key 的最低余额估算'
+              }
+            >{typeof key.coins === 'number' ? `${fmtCoins(key.coins)} 币` : '余额未知'}</span>
             <span
               className={`badge ${key.full ? 'badge-pending' : 'badge-ok'}`}
               title={key.measured === 'platform' ? 'RunningHub 平台上的在跑任务数（含别人用同一个 Key 跑的）' : `平台状态没问到，这是本地计数（${key.localRunning}）`}
@@ -663,14 +682,22 @@ function RunninghubKeys() {
           <div className="rh-pool-foot">
             <span className="muted">{`共 ${pool.total} 个 Key，可并行 ${pool.concurrency} 个，${stale ? '本地记着在跑' : '平台在跑'} ${pool.running} 个`}</span>
             {pool.sites?.map((site) => (
-              <span className="muted" key={site.site}>{`${site.label} ${site.keys} 个`}</span>
+              <span className="muted" key={site.site}>{`${site.label} ${site.keys} 个${typeof site.coins === 'number' ? ` / ${fmtCoins(site.coins)} 币` : ''}`}</span>
             ))}
             {pool.live?.at ? <span className="muted">{`更新于 ${fmtTime(pool.live.at)}`}</span> : null}
-            <button className="btn btn-sm" type="button" disabled={busy} onClick={() => load(true)}>
+            <button className="btn btn-sm" type="button" disabled={busy} onClick={() => load(true, true)}>
               刷新
             </button>
           </div>
         )}
+        {pool?.coins && pool.coins.known > 0 && (
+          <div className="rh-pool-foot">
+            <span className="muted">{`余额合计 ${fmtCoins(pool.coins.total)} ${pool.coins.unit} · 最多 ${fmtCoins(pool.coins.max)} / 最少 ${fmtCoins(pool.coins.min)} · 极差 ${fmtCoins(pool.coins.spread)}（越小越均衡）`}</span>
+            {pool.coins.unknown > 0 && <span className="muted">{`${pool.coins.unknown} 个 Key 的余额还没问到`}</span>}
+          </div>
+        )}
+        {pool?.live?.coinsOk === false && pool?.coins && pool.coins.known > 0 && <span className="muted">本轮没问到平台余额，上面显示的是上次查到的值。</span>}
+        {pool?.routing && !pool.routing.byCoins && <span className="muted">余额路由已关闭，当前按并发轮转挑 Key。</span>}
         {stale && <span className="muted">{pool?.live?.error || '没问到 RunningHub 平台的在跑数，显示的是本地计数。'}</span>}
         {pool?.source && <span className="muted ellipsis">{`来源：${pool.source}`}</span>}
         {pool?.workflows.length ? (

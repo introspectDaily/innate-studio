@@ -10,7 +10,7 @@ import { execFile } from 'node:child_process';
 import { HttpError, MIME, readJsonBody, route } from '../http.js';
 import { MAX_UPLOAD_BYTES } from '../config.js';
 import { localMediaFile } from '../media.js';
-import { claim, drop, pick, resolveWorkflowId, resolveWorkflowIds, rhHasKey, rhKeyState, submitWorkflow, uploadMedia } from '../runninghub.js';
+import { claim, drop, kickRhCoinsRefresh, pick, resolveWorkflowId, resolveWorkflowIds, rhHasKey, rhKeyState, submitWorkflow, uploadMedia } from '../runninghub.js';
 import { RH_PROVIDER, RH_SITES, RH_WORKFLOWS, rhCost, rhMachines, rhMedia, rhPlan, rhRules, rhVideoKey, rhWorkflow, rhUuid } from '../../shared/runninghub.ts';
 import { applyTaskState, historyView, newItem } from '../tasks.js';
 import { previewState, startPreview, stopPreview } from '../rhpreview.js';
@@ -57,9 +57,10 @@ route('GET', /^\/api\/runninghub\/workflows$/, async () => {
 // 这个接口返回 state:'none'，前端照常等轮询结果，不影响出片。
 route('GET', /^\/api\/runninghub\/preview\/([^/]+)$/, async ({ params }) => previewState(decodeURIComponent(params[0])) || { state: 'none' });
 
-// 管理面板：有哪些 Key、各自跑到多满、每个工作流配的是哪个 workflowId。只给管理员，Key 只露头尾。
-// 「跑到多满」问的是 RunningHub 平台（currentTaskCounts），不是本地计数——同一个 Key 可能还有别人在用。
-route('GET', /^\/api\/runninghub\/keys$/, async () => rhKeyState(), 'admin');
+// 管理面板：有哪些 Key、各自跑到多满、还剩多少 RH 币、每个工作流配的是哪个 workflowId。
+// 只给管理员，Key 只露头尾。「跑到多满」和余额都问 RunningHub 平台（accountStatus），不是本地计数。
+// ?refresh=1 是面板上的「刷新」：跳过 20 秒缓存，立刻再问一次平台。
+route('GET', /^\/api\/runninghub\/keys$/, async ({ query }) => rhKeyState({ force: query.get('refresh') === '1' }), 'admin');
 
 // ---------- 素材：页面给的值 → 平台认的 fileName ----------
 // 页面传三种值：本机文件（/media/...）、公网链接、data URL。三种都读成 Buffer 再上传。
@@ -148,6 +149,8 @@ route('POST', /^\/api\/runninghub\/submit$/, async ({ req, space, user }) => {
   let taskId;
   let submitted;
   try {
+    // 顺手催一次余额刷新（不等待）：没打开过管理面板的部署，路由也能尽快拿到各 Key 的积分。
+    kickRhCoinsRefresh();
     // 只在「这个站点上配了该工作流 id」的 Key 里挑：两个站点的工作流调不到对方那边。
     lease = await pick(workflow);
     const workflowId = resolveWorkflowId(workflow, lease.site);

@@ -1355,8 +1355,12 @@ input[type='search']::-webkit-search-cancel-button { -webkit-appearance: none; }
 .rh-pool-row { display: flex; align-items: center; gap: var(--sp-8); min-width: 0; font-size: var(--text-caption); }
 .rh-pool-title { flex: 0 1 auto; max-width: 40%; color: var(--text); }
 .rh-pool-row .badge { flex: none; }
+/* 余额位数不同时数字等宽，整行不会左右跳。 */
+.rh-pool-row .rh-coins { font-variant-numeric: tabular-nums; }
 .rh-pool-foot { display: flex; align-items: center; gap: var(--sp-8); flex-wrap: wrap; padding-top: var(--sp-4); border-top: 1px solid var(--border); font-size: var(--text-caption); }
 .rh-pool-foot .muted:first-child { flex: 1; }
+/* 紧接着的第二行汇总不重复画分隔线。 */
+.rh-pool-foot + .rh-pool-foot { padding-top: 0; border-top: 0; }
 .rh-pool-flows { display: flex; flex-direction: column; gap: var(--sp-4); padding-top: var(--sp-4); border-top: 1px solid var(--border); }
 /* 工作流那两行没有站点和在跑数，名字可以占宽一点。 */
 .rh-pool-flow { display: flex; align-items: baseline; gap: var(--sp-8); min-width: 0; font-size: var(--text-caption); }

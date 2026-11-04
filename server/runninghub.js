@@ -8,6 +8,8 @@
 // 3. 判成败不能看 HTTP 状态：平台成功失败都返回 200，要看 body 里的 errorCode（V2）或者 code（V1）。
 // 4. 素材要先传到平台，拿回 fileName 才能塞进 ComfyUI 节点的字段里（不是公网 URL 那套）。两个站的素材库
 //    也是分开的，所以素材必须传到「这次任务用的那个 Key」所在的站点。
+// 5. 每个 Key 的账户还有自己的余额（remainCoins，RH 币）。挑 Key 时优先用余额多的，让各账号余额趋近；
+//    余额是后台定时拉回来的一份快照，提交任务时只读内存，不会为了排序去打平台接口。
 //
 // Key 从哪来：环境变量 RUNNINGHUB_KEYS_FILE 给一个 JSON 文件的路径，读出里面的 Key 列表。
 // 没有路径时也认 RUNNINGHUB_KEYS（一段 JSON 文本）和 RUNNINGHUB_API_KEY（单个 Key）。
@@ -90,6 +92,10 @@ export function parseKeys(raw) {
 
 let cache = { at: 0, stamp: '', keys: [], source: '', error: '' };
 
+// 内存里的源（环境变量、config.json）用内容摘要当 stamp：内容换了就能发现，
+// 不然 env 源永远叫「env:RUNNINGHUB_KEYS」，改了内容也重读不了。摘要只在内存里比，不落盘不输出。
+const digest = (raw) => crypto.createHash('sha1').update(raw).digest('hex').slice(0, 12);
+
 function readKeySource() {
   const file = process.env[RUNNINGHUB.envKeysFile] || '';
   if (file) {
@@ -101,18 +107,29 @@ function readKeySource() {
       return { raw: '', stamp: `${resolved}:missing`, source: resolved, error: `读不到 Key 文件 ${resolved}：${err.message}` };
     }
   }
-  if (process.env[RUNNINGHUB.envKeys]) return { raw: process.env[RUNNINGHUB.envKeys], stamp: 'env:RUNNINGHUB_KEYS', source: '环境变量 RUNNINGHUB_KEYS' };
-  if (process.env[RUNNINGHUB.envKey]) return { raw: JSON.stringify([process.env[RUNNINGHUB.envKey]]), stamp: 'env:RUNNINGHUB_API_KEY', source: '环境变量 RUNNINGHUB_API_KEY' };
+  if (process.env[RUNNINGHUB.envKeys]) {
+    const raw = process.env[RUNNINGHUB.envKeys];
+    return { raw, stamp: `env:RUNNINGHUB_KEYS:${digest(raw)}`, source: '环境变量 RUNNINGHUB_KEYS' };
+  }
+  if (process.env[RUNNINGHUB.envKey]) {
+    const raw = JSON.stringify([process.env[RUNNINGHUB.envKey]]);
+    return { raw, stamp: `env:RUNNINGHUB_API_KEY:${digest(raw)}`, source: '环境变量 RUNNINGHUB_API_KEY' };
+  }
   // 兜底：数据目录 config.json 里的 runninghubKeys（和管理面板能改的其它 Key 放一起）。
   const inline = config[RUNNINGHUB.configKey];
-  if (inline) return { raw: typeof inline === 'string' ? inline : JSON.stringify(inline), stamp: 'config:runninghubKeys', source: '数据目录 config.json' };
+  if (inline) {
+    const raw = typeof inline === 'string' ? inline : JSON.stringify(inline);
+    return { raw, stamp: `config:runninghubKeys:${digest(raw)}`, source: '数据目录 config.json' };
+  }
   return { raw: '', stamp: '', source: '', error: '' };
 }
 
-// 当前的 Key 列表。文件变了就重读（最多 5 秒一次，不用每次请求都 stat）。
+// 当前的 Key 列表。只有「文件源」才用 5 秒节流（省掉每次请求都 stat）；
+// 环境变量和 config.json 都在内存里，读一次几乎不花钱，所以每次都读，改了立刻生效。
 export function rhKeys() {
   const now = Date.now();
-  if (cache.at && now - cache.at < RELOAD_MS) return cache.keys;
+  const file = process.env[RUNNINGHUB.envKeysFile];
+  if (file && cache.at && now - cache.at < RELOAD_MS && cache.stamp.startsWith(`${path.resolve(file)}:`)) return cache.keys;
   const source = readKeySource();
   if (source.error) {
     cache = { at: now, stamp: source.stamp, keys: [], source: source.source, error: source.error };
@@ -148,25 +165,54 @@ export function rhSummary() {
   };
 }
 
-// ---------- 平台侧运行状态 ----------
+// ---------- 平台侧运行状态与余额 ----------
 // 为什么要问平台：这份 Key 文件里的 Key 可能同时被别的项目、别的人用，本地只知道自己派出去几单，
 // 平台上真正占着并发的是「我们 + 别人」。管理面板上的「在跑」要的是后者。
 // 用 /uc/openapi/accountStatus（网页端在用的账号接口，文档没公开，实测可用）：
 //   POST {apiKey} → {code:0, data:{remainCoins:"10351", currentTaskCounts:"0", remainMoney, currency, apiType}}
-// currentTaskCounts 就是这个账号（这个 Key）此刻在跑的任务数，按 Key 各查各的。
+// currentTaskCounts 是这个账号此刻在跑的任务数；remainCoins 是剩余 RH 币（账户积分）。按 Key 各查各的：
+// 余额既给管理面板看，也用来挑 Key——优先用余额多的账号，让各账号的余额慢慢趋近。
 // 另一条 /api/billing/usage/wideDetails（网页端「账单明细」）**用 API Key 打不通**：
 // 返回 {code:412,msg:"TOKEN_INVALID"}，它只认浏览器里的登录 token，所以不选它。
-// 查平台要花时间，所以答案缓存 20 秒：打开管理面板、点刷新都够用，也不会把平台打烦。
+// 查平台要花时间，所以答案缓存 20 秒；服务另外按 RUNNINGHUB_COINS_REFRESH_MS 后台刷新，路由只读这份内存快照，
+// 提交任务时绝不为了算优先级去打一次网络请求。
 const LIVE_TTL_MS = 20 * 1000;
 const LIVE_TIMEOUT_MS = 8 * 1000;
 const LIVE_CONCURRENCY = 4;
-let live = { at: 0, stamp: '', counts: new Map(), error: '', ok: false };
+let live = { at: 0, stamp: '', counts: new Map(), coins: new Map(), coinIds: new Set(), error: '', ok: false, coinsOk: false };
 let inflight = null;
+
+// 平台给的是字符串，也可能是 null（remainMoney 就是）。认不出来一律当「没问到」，不能把 null 当成 0 币。
+function numeric(value) {
+  if (value == null || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+// 账户状态里我们关心的两个数，抽出来单独测。
+export function parseAccountStatus(data) {
+  const running = numeric(data?.currentTaskCounts);
+  const coins = numeric(data?.remainCoins);
+  return {
+    running: running == null ? null : Math.max(0, Math.round(running)),
+    coins: coins == null ? null : Math.max(0, Math.round(coins * 100) / 100),
+  };
+}
+
+// 上次快照之后派出去的单：{id, at}。平台余额的更新有延迟，用它给刚派过单的 Key 先记一笔虚拟消耗，
+// 免得同一批并发请求全挤到「余额最高」的那一个 Key 上。拿到新快照后，快照时刻之前的记录作废。
+let dispatches = [];
+const pruneDispatches = (at) => {
+  dispatches = dispatches.filter((item) => item.at > at);
+};
 
 async function collectLive(keys, stamp) {
   const counts = new Map();
+  const coins = new Map();
   const failed = [];
   let cursor = 0;
+  // 快照时间取发起查询的时刻：这之后派出去的单，消耗多半还没反映到平台的余额里。
+  const at = Date.now();
   // 同时最多问 4 个：Key 多了也不至于一口气打出几十个请求。
   const worker = async () => {
     while (cursor < keys.length) {
@@ -174,9 +220,10 @@ async function collectLive(keys, stamp) {
       try {
         // 这个接口要 body 里再带一份 apiKey（V1 的老规矩），只给 header 不认。
         const data = await call(item, { path: '/uc/openapi/accountStatus', json: { apiKey: item.key }, timeoutMs: LIVE_TIMEOUT_MS });
-        const value = Number(data?.currentTaskCounts);
-        if (Number.isFinite(value)) counts.set(item.id, Math.max(0, Math.round(value)));
-        else failed.push(item.title);
+        const status = parseAccountStatus(data);
+        if (status.running != null) counts.set(item.id, status.running);
+        if (status.coins != null) coins.set(item.id, status.coins);
+        if (status.running == null && status.coins == null) failed.push(item.title);
       } catch {
         // 单个 Key 查不到（失效、被封、超时）不影响别的 Key：这个 Key 的页面数字回落到本地计数。
         failed.push(item.title);
@@ -184,21 +231,30 @@ async function collectLive(keys, stamp) {
     }
   };
   await Promise.all(Array.from({ length: Math.min(LIVE_CONCURRENCY, keys.length) }, worker));
+  // 余额变化慢，某一轮全问不到时留着上次的值继续用，别让路由突然跳回纯轮转。
+  // 在跑数不行：那是「此刻」的数，查不到就得回落本地计数，不能拿旧值冒充。
+  const merged = new Map(live.coins);
+  for (const [id, value] of coins) merged.set(id, value);
+  if (coins.size > 0) pruneDispatches(at);
   live = {
-    at: Date.now(),
+    at,
     stamp,
     counts,
-    ok: counts.size > 0,
+    coins: merged,
+    coinIds: new Set(coins.keys()),
+    ok: counts.size > 0 || coins.size > 0,
+    coinsOk: coins.size > 0,
     error: failed.length ? `有 ${failed.length} 个 Key 没问到平台状态（${failed.slice(0, 2).join('、')}${failed.length > 2 ? ' 等' : ''}）` : '',
   };
   return live;
 }
 
-// 每个 Key 在平台上跑着几个任务。Key 文件变了（stamp 变了）就重新问，不看缓存。
-export function rhLiveUsage() {
+// 每个 Key 在平台上跑着几个任务、还剩多少币。Key 文件变了（stamp 变了）就重新问，不看缓存。
+// force 给管理面板的「刷新」用：不等 20 秒 TTL，立刻再问一次平台。
+export function rhLiveUsage({ force = false } = {}) {
   const keys = rhKeys();
   const stamp = `${readKeySource().stamp}|${keys.map((item) => `${item.id}:${item.site}`).join(',')}`;
-  if (live.stamp === stamp && live.at && Date.now() - live.at < LIVE_TTL_MS) return Promise.resolve(live);
+  if (!force && live.stamp === stamp && live.at && Date.now() - live.at < LIVE_TTL_MS) return Promise.resolve(live);
   // 两个人同时打开管理面板时只发一轮请求。
   if (inflight) return inflight;
   inflight = collectLive(keys, stamp).finally(() => {
@@ -207,14 +263,32 @@ export function rhLiveUsage() {
   return inflight;
 }
 
-// 管理面板用：有哪些 Key（各自在哪个站点、平台上跑到多满）、从哪儿读的。**只给头尾**，不给完整 Key。
-// 这一份只给管理员（routes/runninghub.js 里 access = 'admin'）。
+// 服务启动时开一个后台刷新：不打开管理面板、只提交任务的部署，路由也能拿到余额。
+// 定时器 unref，不拦着进程退出；设 RUNNINGHUB_COINS_REFRESH_MS=0 可以只靠管理面板和提交时的懒刷新。
+let poller = null;
+export function startRhCoinsPolling() {
+  if (poller || RUNNINGHUB.coinsRefreshMs <= 0) return;
+  const tick = () => void rhLiveUsage().catch(() => {});
+  tick();
+  poller = setInterval(tick, RUNNINGHUB.coinsRefreshMs);
+  poller.unref?.();
+}
+
+// 提交任务时顺手催一次刷新（不等待）：TTL 和 inflight 保证不会重复打平台。
+export const kickRhCoinsRefresh = () => void rhLiveUsage().catch(() => {});
+
+// 管理面板用：有哪些 Key（各自在哪个站点、平台上跑到多满、还剩多少 RH 币）、从哪儿读的。
+// **只给头尾**，不给完整 Key。这一份只给管理员（routes/runninghub.js 里 access = 'admin'）。
 // running 优先用平台给的 currentTaskCounts；平台没答上来的那个 Key 才用本地计数，并标注 measured。
-export async function rhKeyState() {
+export async function rhKeyState({ force = false } = {}) {
   const keys = rhKeys();
   const source = readKeySource();
-  const usage = await rhLiveUsage();
+  const usage = await rhLiveUsage({ force });
   const runningOf = (item) => usage.counts.get(item.id) ?? slotsOf(item.id).size;
+  const coinsOf = (item) => usage.coins.get(item.id) ?? null;
+  const known = keys.map(coinsOf).filter((value) => value !== null);
+  const min = known.length ? Math.min(...known) : null;
+  const max = known.length ? Math.max(...known) : null;
   return {
     configured: keys.length > 0,
     source: source.source,
@@ -224,15 +298,32 @@ export async function rhKeyState() {
     concurrency: keys.reduce((sum, item) => sum + item.concurrency, 0),
     running: keys.reduce((sum, item) => sum + runningOf(item), 0),
     // 这批数字是问的谁：platform = RunningHub 平台（含别人跑的），local = 本地占位（平台查不到时的兜底）。
-    live: { at: usage.at, ok: usage.ok, error: usage.error, ttl: LIVE_TTL_MS },
-    // 两个站点各自配了几个 Key、能并行几个（一个站没配就是 0）。
-    sites: RH_SITES.map((site) => ({
-      site,
-      label: rhSiteLabel(site),
-      host: rhSiteHost(site),
-      keys: keys.filter((item) => item.site === site).length,
-      concurrency: keys.filter((item) => item.site === site).reduce((sum, item) => sum + item.concurrency, 0),
-    })),
+    live: { at: usage.at, ok: usage.ok, coinsOk: usage.coinsOk, error: usage.error, ttl: LIVE_TTL_MS },
+    // 余额汇总：极差越小，说明各账号用得越均衡。
+    coins: {
+      unit: 'RH 币',
+      at: usage.at,
+      known: known.length,
+      unknown: keys.length - known.length,
+      total: known.length ? known.reduce((sum, value) => sum + value, 0) : null,
+      min,
+      max,
+      spread: min === null ? null : Math.round((max - min) * 100) / 100,
+    },
+    routing: { byCoins: RUNNINGHUB.routeByCoins, refreshMs: RUNNINGHUB.coinsRefreshMs },
+    // 两个站点各自配了几个 Key、能并行几个、合计还剩多少币（一个站没配就是 0 / null）。
+    sites: RH_SITES.map((site) => {
+      const own = keys.filter((item) => item.site === site);
+      const ownCoins = own.map(coinsOf).filter((value) => value !== null);
+      return {
+        site,
+        label: rhSiteLabel(site),
+        host: rhSiteHost(site),
+        keys: own.length,
+        concurrency: own.reduce((sum, item) => sum + item.concurrency, 0),
+        coins: ownCoins.length ? ownCoins.reduce((sum, value) => sum + value, 0) : null,
+      };
+    }),
     keys: keys.map((item) => {
       const running = runningOf(item);
       return {
@@ -242,6 +333,9 @@ export async function rhKeyState() {
         siteLabel: rhSiteLabel(item.site),
         concurrency: item.concurrency,
         running,
+        coins: coinsOf(item),
+        // platform = 这次刚问到；cached = 这轮没问到、沿用上次的值；unknown = 从没问到过。
+        coinsMeasured: usage.coinIds.has(item.id) ? 'platform' : usage.coins.has(item.id) ? 'cached' : 'unknown',
         // 这个数字是平台给的，还是（平台没答上来时）本地自己数的。
         measured: usage.counts.has(item.id) ? 'platform' : 'local',
         localRunning: slotsOf(item.id).size,
@@ -311,6 +405,46 @@ let cursor = 0;
 
 const slotsOf = (id) => running.get(id) || new Set();
 
+// 给空闲的 Key 排优先级。纯函数，方便单测；coins / spent 都是 Map<keyId, number>。
+// 目标：余额多的先用，高余额先被消耗，各账号的余额慢慢趋近。四条规矩：
+//  1. 查不到余额的按「已知余额里最低的那个」算——既不让它饿死，也不会被优先照顾；
+//     一个都没查到时分数全相等，退化成原来的轮转。
+//  2. spent 是上次快照之后本进程派出去的单折算的虚拟消耗，防止一批并发请求全挤到余额最高的 Key。
+//  3. 只要还有别的 Key 有余额，就把余额耗尽的排除，省得提交时吃平台的 416。
+//  4. 同分按轮转顺序排，保持原来「两个都空闲就轮着来」的手感。
+export function rankKeys(free, { coins = new Map(), spent = new Map(), cursor: rotation = 0, byCoins = true } = {}) {
+  const size = free.length;
+  if (!size) return [];
+  const values = free.map((item) => {
+    const value = coins.get(item.id);
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  });
+  const known = values.filter((value) => value !== null);
+  const floor = known.length ? Math.min(...known) : 0;
+  const hasBalance = known.some((value) => value > 0);
+  return free
+    .map((item, index) => ({
+      item,
+      order: (index - (rotation % size) + size) % size,
+      value: values[index],
+      score: byCoins ? (values[index] ?? floor) - (spent.get(item.id) || 0) : 0,
+    }))
+    .filter(({ value }) => !byCoins || !hasBalance || value === null || value > 0)
+    .sort((a, b) => b.score - a.score || a.order - b.order)
+    .map(({ item }) => item);
+}
+
+// 上次快照之后派出去的单，折算成每个 Key 的虚拟消耗（币）。
+// 快照里的余额已经含了查询发起之前的消耗，所以那之前的记录不再计。
+function spentSinceSnapshot() {
+  const spent = new Map();
+  for (const item of dispatches) {
+    if (item.at <= live.at) continue;
+    spent.set(item.id, (spent.get(item.id) || 0) + RUNNINGHUB.routeSpend);
+  }
+  return spent;
+}
+
 // 服务重启后内存里的计数没了，但平台上那些任务还在跑。用历史记录把占位情况还原回来，
 // 不然重启一次就会把同一个 Key 的超额任务又派上去。
 // 每次提交前都扫一遍：成员的空间可能是这之后才打开的（多用户模式下），那会儿也要把它算进来。
@@ -330,8 +464,10 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // 挑一个还有空位的 Key。都满时等一会儿再看，等不到就报「都在忙」。
 // 传进来的 workflow 用来过滤：只有「这个站点上配了该工作流 id」的 Key 才能接这单——两个站点的工作流互相调不到，
 // 挑错了会在提交时白报一次 380。
+// 有余额数据时按「余额多的优先」排，没有就退回轮转。options 里的 coins / spent / byCoins 可以覆盖快照，
+// 给测试和特殊调用方用；正常情况下路由只读内存快照，不为了排序去打平台接口。
 // 返回的 lease 带一个 ticket 和 site，提交成功后用 claim() 换成 taskId，失败了用 drop() 还回去。
-export async function pick(workflow, waitMs = RUNNINGHUB.waitMs) {
+export async function pick(workflow, waitMs = RUNNINGHUB.waitMs, options = {}) {
   hydrate();
   const deadline = Date.now() + Math.max(0, Number(waitMs) || 0);
   for (;;) {
@@ -344,10 +480,18 @@ export async function pick(workflow, waitMs = RUNNINGHUB.waitMs) {
     }
     const free = usable.filter((item) => slotsOf(item.id).size < item.concurrency);
     if (free.length) {
-      // 轮着来：两个都空闲时这次用第一个、下次用第二个，负载自然摊开。
-      const key = free[cursor % free.length];
+      const ordered = rankKeys(free, {
+        coins: options.coins ?? live.coins,
+        spent: options.spent ?? spentSinceSnapshot(),
+        cursor,
+        byCoins: options.byCoins ?? RUNNINGHUB.routeByCoins,
+      });
+      const key = ordered[0];
       cursor += 1;
       const ticket = `t${crypto.randomBytes(6).toString('hex')}`;
+      // 记一笔虚拟消耗：同一批并发提交里，下一个请求会看到这个 Key 已经「花掉」一点。
+      dispatches.push({ id: key.id, at: Date.now(), ticket });
+      if (dispatches.length > 500) dispatches = dispatches.slice(-250);
       if (!running.has(key.id)) running.set(key.id, new Set());
       running.get(key.id).add(ticket);
       return { ...key, ticket };
@@ -367,9 +511,11 @@ export function claim(lease, taskId) {
   set.add(String(taskId));
 }
 
-// 提交失败（或者根本没提交）：立刻还位子。
+// 提交失败（或者根本没提交）：立刻还位子，这单也不该算进虚拟消耗。
 export function drop(lease) {
-  if (lease?.ticket) running.get(lease.id)?.delete(lease.ticket);
+  if (!lease?.ticket) return;
+  running.get(lease.id)?.delete(lease.ticket);
+  dispatches = dispatches.filter((item) => item.ticket !== lease.ticket);
 }
 
 // 任务结束（成功或失败）时还位子。查询轮询里调，keyId 记在记录上。

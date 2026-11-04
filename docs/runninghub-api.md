@@ -567,7 +567,9 @@ RunningHub 和 **AutoDL 几乎同构**：都是「提交 → taskId → 查 → 
 3. ~~`/uc/openapi/accountStatus` 的成功返回结构~~ ✅ 已实测（2026-11-01，海外站）：
    `POST /uc/openapi/accountStatus`，header `Authorization: Bearer <API Key>` + body `{apiKey}`（body 必须带，缺了不认），
    返回 `{"code":0,"msg":"success","data":{"remainCoins":"10351","currentTaskCounts":"0","remainMoney":null,"currency":null,"apiType":"NORMAL"}}`。
-   `currentTaskCounts` 是该账号此刻在跑的任务数（含别人用同一个 Key 跑的），已接入管理面板（`server/runninghub.js` 的 `rhLiveUsage`）。
+   `currentTaskCounts` 是该账号此刻在跑的任务数（含别人用同一个 Key 跑的），`remainCoins` 是剩余 RH 币（账户积分）。
+   两者都已接入（`server/runninghub.js` 的 `rhLiveUsage`）：前者给管理面板显示真实并发，后者既给管理面板显示余额，
+   也作为「余额多的 Key 优先」路由的依据（`rankKeys`）；用时读的是后台刷新的内存快照，不会在提交任务时额外打这个接口。
    顺带实测：网页端的 `POST /api/billing/usage/wideDetails` 用 API Key 调返回 `{"code":412,"msg":"TOKEN_INVALID"}`，它只认浏览器登录 token。
 4. **模型 API 是否支持 `webhookUrl`**（文档只在工作流 API 提到）。
 5. **`.cn` / `.ai` 的 Key 是否互通**。

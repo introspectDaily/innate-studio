@@ -11,6 +11,13 @@ export const PORT = Number(process.env.PORT) || 5178;
 export const HOST = process.env.HOST || '127.0.0.1';
 
 const trimSlash = (url) => url.replace(/\/+$/, '');
+// 读一个非负数的环境变量；没给或写错了就用默认值。
+const envNumber = (name, fallback) => {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+};
 // RunningHub 的默认站点：Key 文件没写 site、或者用 RUNNINGHUB_API_KEY 临时给一个 Key 时用它。
 const RH_DEFAULT_SITE = rhSiteOf(process.env.RUNNINGHUB_SITE) || 'cn';
 // 火山方舟：视频（Seedance）、图片（Seedream）、文本（豆包）都走它。地址里已经带着版本号，所以接口路径前面没有 /v1。
@@ -69,6 +76,14 @@ export const RUNNINGHUB = {
   waitMs: Number(process.env.RUNNINGHUB_QUEUE_WAIT_MS ?? 15000),
   // 上传的素材地址在平台那边只留一天，缓存比这个短一点。
   uploadTtlMs: 20 * 60 * 60 * 1000,
+  // 账户余额路由：/uc/openapi/accountStatus 会带回 remainCoins（RH 币）。挑 Key 时优先用余额多的，
+  // 高余额的先被消耗，各账号的余额自然趋近。设 RUNNINGHUB_ROUTE_BY_COINS=0 回到纯轮转。
+  routeByCoins: process.env.RUNNINGHUB_ROUTE_BY_COINS !== '0',
+  // 后台多久问一次平台状态（毫秒）。0 = 不定时问，只在打开管理面板/提交任务时问。
+  coinsRefreshMs: envNumber('RUNNINGHUB_COINS_REFRESH_MS', 60000),
+  // 快照之外每派一单先虚拟扣掉多少币：只为把同一批并发请求摊到不同 Key，不是精确记账。
+  // 平台余额的更新有延迟，这笔虚拟账只从上次快照时刻算起，拿到新快照就作废。
+  routeSpend: envNumber('RUNNINGHUB_ROUTE_SPEND', 1),
 };
 
 // 环境变量原来叫 SEEDANCE_*（项目改名前），旧名字还认。

@@ -1,8 +1,8 @@
 // RunningHub：Key 文件的几种写法、登记表编译成规则、槽位和参数拼成 nodeInfoList。都是纯函数，不碰网络。
 
-import test from 'node:test';
+import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { drop, parseKeys, pick, resolveWorkflowId, resolveWorkflowIds, rhBaseUrl } from '../server/runninghub.js';
+import { drop, parseAccountStatus, parseKeys, pick, rankKeys, resolveWorkflowId, resolveWorkflowIds, rhBaseUrl, rhKeyState } from '../server/runninghub.js';
 import { RH_WORKFLOWS, rhCost, rhMachines, rhMedia, rhPlan, rhRules, rhSiteOf, rhWorkflow, rhUuid } from '../shared/runninghub.ts';
 import { flowInputs, flowVideoSpec, formValues } from '../shared/autodl.ts';
 
@@ -104,6 +104,140 @@ test('挑 Key 按站点过滤：只有配了该工作流 ID 的站点才接单',
       (err) => err.status === 503 && /没有配置工作流 ID/.test(err.message),
     );
   } finally {
+    delete process.env.RUNNINGHUB_KEYS;
+  }
+});
+
+// ---------- 账户余额与「余额多的优先」路由 ----------
+// 这几个 Key 只用来排顺序，不碰网络。
+const rankItems = (...ids) => ids.map((id) => ({ id, title: id }));
+const rankOrder = (list) => list.map((item) => item.id);
+
+test('账户状态：认字符串数字，null 不能当成 0 币', () => {
+  assert.deepEqual(parseAccountStatus({ remainCoins: '10351', currentTaskCounts: '0' }), { running: 0, coins: 10351 });
+  assert.deepEqual(parseAccountStatus({ remainCoins: 12.5, currentTaskCounts: 3 }), { running: 3, coins: 12.5 });
+  // remainMoney 就是 null；把 null 当 0 会把这个 Key 误判成「余额耗尽」。
+  assert.deepEqual(parseAccountStatus({ remainCoins: null, currentTaskCounts: null, remainMoney: null }), { running: null, coins: null });
+  assert.deepEqual(parseAccountStatus({ remainCoins: 'n/a', currentTaskCounts: '-1' }), { running: 0, coins: null });
+  assert.deepEqual(parseAccountStatus(null), { running: null, coins: null });
+});
+
+test('按剩余积分排优先级：多的先用，同分按轮转', () => {
+  const free = rankItems('a', 'b', 'c');
+  const coins = new Map([['a', 10], ['b', 500], ['c', 80]]);
+  assert.deepEqual(rankOrder(rankKeys(free, { coins })), ['b', 'c', 'a']);
+  const even = new Map(free.map((item) => [item.id, 100]));
+  assert.deepEqual(rankOrder(rankKeys(free, { coins: even, cursor: 0 })), ['a', 'b', 'c']);
+  assert.deepEqual(rankOrder(rankKeys(free, { coins: even, cursor: 1 })), ['b', 'c', 'a']);
+  assert.deepEqual(rankOrder(rankKeys([], { coins })), []);
+});
+
+test('查不到余额的按最低已知值参与，不会饿死；一个都没查到就退回轮转', () => {
+  const free = rankItems('a', 'b', 'c', 'd');
+  const coins = new Map([['a', 1000], ['b', 100], ['c', 900]]); // d 没问到
+  // d 按 100 算，和 b 同分，按原顺序排在 b 后面。
+  assert.deepEqual(rankOrder(rankKeys(free, { coins })), ['a', 'c', 'b', 'd']);
+  assert.deepEqual(rankOrder(rankKeys(free, { coins: new Map(), cursor: 2 })), ['c', 'd', 'a', 'b']);
+  // 关掉积分路由就是原来的轮转。
+  assert.deepEqual(rankOrder(rankKeys(free, { coins, byCoins: false, cursor: 1 })), ['b', 'c', 'd', 'a']);
+});
+
+test('别的 Key 还有余额就不挑耗尽的；全都耗尽时照常轮转，让平台自己判 416', () => {
+  const free = rankItems('a', 'b', 'c');
+  assert.deepEqual(rankOrder(rankKeys(free, { coins: new Map([['a', 0], ['b', 50], ['c', 20]]) })), ['b', 'c']);
+  assert.deepEqual(rankOrder(rankKeys(free, { coins: new Map([['a', 0], ['b', 0], ['c', 0]]) })), ['a', 'b', 'c']);
+});
+
+test('同一批并发请求靠虚拟消耗摊到不同 Key，不会全挤到余额最高的那个', () => {
+  const free = rankItems('a', 'b');
+  const coins = new Map([['a', 1000], ['b', 990]]);
+  const spent = new Map();
+  const picks = [];
+  for (let i = 0; i < 4; i += 1) {
+    const chosen = rankKeys(free, { coins, spent, cursor: i })[0].id;
+    picks.push(chosen);
+    spent.set(chosen, (spent.get(chosen) || 0) + 10);
+  }
+  assert.deepEqual(picks, ['a', 'b', 'a', 'b']);
+});
+
+test('提交时按余额挑 Key：积分多的优先，耗尽的先不派；站点过滤仍然生效', async () => {
+  process.env.RUNNINGHUB_KEYS = JSON.stringify([
+    { key: 'rh-low-0000000', site: 'cn' },
+    { key: 'rh-high-000000', site: 'cn' },
+    { key: 'rh-ai-00000000', site: 'ai' },
+  ]);
+  try {
+    const [low, high, ai] = parseKeys(process.env.RUNNINGHUB_KEYS).keys;
+    const both = { key: 'demo-coins', name: '余额路由', summary: '', kind: 'video', workflowId: { cn: '111', ai: '222' } };
+    const coins = new Map([[low.id, 10], [high.id, 9999], [ai.id, 50000]]);
+
+    // 海外 Key 余额最高，但这个工作流只在国内站配了 id：不能因为它钱多就跨站点派过去。
+    const cnOnly = { ...both, key: 'demo-coins-cn', workflowId: { cn: '111' } };
+    const lease = await pick(cnOnly, 0, { coins, spent: new Map() });
+    assert.equal(lease.title, high.title);
+    assert.equal(lease.site, 'cn');
+    drop(lease);
+
+    // 高余额那个耗光了，剩下的国内 Key 才接单。
+    const drained = new Map([[low.id, 10], [high.id, 0], [ai.id, 50000]]);
+    const second = await pick(cnOnly, 0, { coins: drained, spent: new Map() });
+    assert.equal(second.title, low.title);
+    drop(second);
+
+    // 两个站点都配了 id 时，余额最高的海外 Key 就能接单了。
+    const third = await pick(both, 0, { coins, spent: new Map() });
+    assert.equal(third.site, 'ai');
+    assert.equal(third.title, ai.title);
+    drop(third);
+  } finally {
+    delete process.env.RUNNINGHUB_KEYS;
+  }
+});
+
+test('端到端：平台返回的余额进快照，面板能看到，路由也照它挑 Key', async () => {
+  process.env.RUNNINGHUB_KEYS = JSON.stringify([
+    { key: 'rh-poor-00000', site: 'cn' },
+    { key: 'rh-rich-00000', site: 'cn' },
+    { key: 'rh-bad-000000', site: 'cn' },
+  ]);
+  // 只拦 accountStatus：富号 900 币、穷号 100 币、坏号直接回平台的 806，不真发网络请求。
+  mock.method(globalThis, 'fetch', async (_url, init) => {
+    const { apiKey } = JSON.parse(init.body);
+    const payload = apiKey === 'rh-bad-000000'
+      ? { code: 806, msg: 'API Key不存在' }
+      : {
+          code: 0,
+          msg: 'success',
+          data: {
+            remainCoins: apiKey === 'rh-rich-00000' ? '900' : '100',
+            currentTaskCounts: apiKey === 'rh-rich-00000' ? '1' : '0',
+            remainMoney: null,
+            currency: null,
+            apiType: 'NORMAL',
+          },
+        };
+    return new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json' } });
+  });
+  try {
+    const state = await rhKeyState({ force: true });
+    assert.deepEqual(state.keys.map((item) => item.coins), [100, 900, null]);
+    assert.deepEqual(state.keys.map((item) => item.coinsMeasured), ['platform', 'platform', 'unknown']);
+    assert.equal(state.keys[1].running, 1);
+    assert.equal(state.keys[2].running, 0); // 平台没问到，回落本地计数
+    assert.equal(state.coins.total, 1000);
+    assert.equal(state.coins.spread, 800);
+    assert.equal(state.coins.unknown, 1);
+    assert.equal(state.live.ok, true);
+    assert.match(state.live.error, /1 个 Key 没问到平台状态/);
+
+    // 这份快照被路由直接用：不传 options.coins，也应该挑中余额多的那个。
+    const workflow = { key: 'demo-live', name: '实时余额', summary: '', kind: 'video', workflowId: { cn: '111' } };
+    const lease = await pick(workflow, 0);
+    assert.equal(lease.title, 'Key 2');
+    drop(lease);
+  } finally {
+    mock.restoreAll();
     delete process.env.RUNNINGHUB_KEYS;
   }
 });

@@ -17,6 +17,7 @@ import { HttpError, notFound, routes, sendJson, serveFile } from './server/http.
 import { apiKey } from './server/keys.js';
 import { MEDIA_PATH } from './server/media.js';
 import { startPolling } from './server/tasks.js';
+import { startRhCoinsPolling } from './server/runninghub.js';
 import { allUsers, apiKeyOf, isHosted, userOf } from './server/auth.js';
 import { openAllSpaces, spaceOf } from './server/spaces.js';
 import './server/routes/account.js';
@@ -156,4 +157,6 @@ server.listen(PORT, HOST, () => {
   // 先把所有空间打开（关掉再开也要接着跑），再开始轮询。
   openAllSpaces();
   startPolling();
+  // 后台拉 RunningHub 各 Key 的余额，供管理面板展示和「余额多的优先」的路由用。
+  startRhCoinsPolling();
 });
